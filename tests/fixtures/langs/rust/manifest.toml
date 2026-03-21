@@ -1,0 +1,7 @@
+[language]
+name = "rust"
+extensions = ["rs"]
+
+[parser]
+type = "wasm"
+download_url = "https://github.com/tree-sitter/tree-sitter-rust/releases/download/v0.23.3/tree-sitter-rust.wasm"
