@@ -93,7 +93,8 @@ pub async fn run_bridge(fallback_path: PathBuf, socket_path: &Path) -> Result<()
                                     let _ = send_json(&mut stdout, &json!({
                                         "jsonrpc": "2.0",
                                         "id": ROOTS_LIST_ID,
-                                        "method": "roots/list"
+                                        "method": "roots/list",
+                                        "params": {}
                                     })).await;
                                     // Don't forward notification to daemon
                                     // (daemon responds to notifications with id:null

@@ -1,3 +1,4 @@
+pub mod lang_manager;
 pub mod chunking;
 #[allow(unused_imports)]
 pub mod core;

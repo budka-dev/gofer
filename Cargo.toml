@@ -20,7 +20,7 @@ arrow-array = "56"
 arrow-schema = "56"
 
 # Parsing
-tree-sitter = "0.24"
+tree-sitter = { version = "0.24", features = ["wasm"] }
 tree-sitter-rust = "0.23"
 tree-sitter-typescript = "0.23"
 tree-sitter-python = "0.23"
@@ -79,6 +79,8 @@ walkdir = "2.5.0"
 # LSP client для rust-analyzer
 lsp-types = "0.97"
 simd-json = "0.17.0"
+reqwest = { version = "0.13.2", features = ["default-tls"] }
+dashmap = "6.1.0"
 
 # Профиль для финального релиза (медленная сборка, максимальная оптимизация)
 [profile.release]
