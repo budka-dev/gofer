@@ -559,7 +559,7 @@ fn go_analyze_struct(
 
     // Walk top-level declarations
     for i in 0..root.child_count() {
-        let node = match root.child(i) {
+        let node = match root.child(i as u32) {
             Some(n) => n,
             None => continue,
         };
@@ -567,7 +567,7 @@ fn go_analyze_struct(
         // type_declaration -> type_spec -> struct_type
         if node.kind() == "type_declaration" {
             for j in 0..node.child_count() {
-                let spec = match node.child(j) {
+                let spec = match node.child(j as u32) {
                     Some(n) if n.kind() == "type_spec" => n,
                     _ => continue,
                 };
@@ -585,12 +585,12 @@ fn go_analyze_struct(
                     }
                     // Extract field_declaration_list
                     for k in 0..struct_node.child_count() {
-                        let field_list = match struct_node.child(k) {
+                        let field_list = match struct_node.child(k as u32) {
                             Some(n) if n.kind() == "field_declaration_list" => n,
                             _ => continue,
                         };
                         for f in 0..field_list.child_count() {
-                            let field = match field_list.child(f) {
+                            let field = match field_list.child(f as u32) {
                                 Some(n) if n.kind() == "field_declaration" => n,
                                 _ => continue,
                             };

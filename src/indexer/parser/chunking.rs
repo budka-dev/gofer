@@ -78,7 +78,7 @@ pub(crate) fn smart_chunk_from_root(
 
     // Обходим top-level узлы
     for i in 0..root.child_count() {
-        let Some(child) = root.child(i) else { continue };
+        let Some(child) = root.child(i as u32) else { continue };
 
         if is_significant_node(child.kind(), language) {
             let node_size = child.end_byte() - child.start_byte();
@@ -236,7 +236,7 @@ fn chunk_oversized_node(
         let mut acc = ChunkAccumulator::new(file_path, code);
 
         for i in 0..node.child_count() {
-            let Some(child) = node.child(i) else { continue };
+            let Some(child) = node.child(i as u32) else { continue };
             let child_size = child.end_byte() - child.start_byte();
 
             if child_size > MAX_CHUNK_BYTES {
@@ -451,7 +451,7 @@ fn extract_node_meta(
         "type_declaration" => {
             // Go type_declaration — look inside for struct/interface
             for i in 0..node.child_count() {
-                if let Some(child) = node.child(i) {
+                if let Some(child) = node.child(i as u32) {
                     if child.kind() == "type_spec" {
                         let name = child
                             .child_by_field_name("name")
@@ -473,7 +473,7 @@ fn extract_node_meta(
         "decorated_definition" => {
             // Заглядываем внутрь: ищем function_definition или class_definition
             for i in 0..node.child_count() {
-                if let Some(child) = node.child(i) {
+                if let Some(child) = node.child(i as u32) {
                     if child.kind() == "function_definition" || child.kind() == "class_definition" {
                         return extract_node_meta(child, code, language);
                     }
@@ -484,7 +484,7 @@ fn extract_node_meta(
         "export_statement" => {
             // Заглядываем внутрь exported declaration
             for i in 0..node.child_count() {
-                if let Some(child) = node.child(i) {
+                if let Some(child) = node.child(i as u32) {
                     if is_significant_node(child.kind(), language) {
                         return extract_node_meta(child, code, language);
                     }

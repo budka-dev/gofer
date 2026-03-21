@@ -20,7 +20,7 @@ arrow-array = "56"
 arrow-schema = "56"
 
 # Parsing
-tree-sitter = { version = "0.24.7", features = ["wasm"] }
+tree-sitter = { version = "0.26.7", features = ["wasm"] }
 tree-sitter-rust = "0.23"
 tree-sitter-typescript = "0.23"
 tree-sitter-python = "0.23"

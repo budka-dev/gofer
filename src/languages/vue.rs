@@ -228,7 +228,7 @@ fn extract_section_with_attrs_ts_html(content: &str, tag: &str) -> Option<(Strin
     let element_kind = format!("{}_element", tag);
 
     for i in 0..root.child_count() {
-        let child = root.child(i)?;
+        let child = root.child(i as u32)?;
         if child.kind() != element_kind && child.kind() != "element" {
             continue;
         }
@@ -236,12 +236,12 @@ fn extract_section_with_attrs_ts_html(content: &str, tag: &str) -> Option<(Strin
         if child.kind() == "element" {
             let start_tag = child.child_by_field_name("start_tag").or_else(|| {
                 (0..child.child_count())
-                    .filter_map(|j| child.child(j))
+                    .filter_map(|j| child.child(j as u32))
                     .find(|n| n.kind() == "start_tag")
             });
             if let Some(st) = start_tag {
                 let tag_name = (0..st.child_count())
-                    .filter_map(|j| st.child(j))
+                    .filter_map(|j| st.child(j as u32))
                     .find(|n| n.kind() == "tag_name")
                     .and_then(|n| n.utf8_text(content.as_bytes()).ok());
                 if tag_name != Some(tag) {
@@ -255,7 +255,7 @@ fn extract_section_with_attrs_ts_html(content: &str, tag: &str) -> Option<(Strin
         // Extract attributes from start tag
         let mut attrs = String::new();
         for j in 0..child.child_count() {
-            if let Some(inner) = child.child(j) {
+            if let Some(inner) = child.child(j as u32) {
                 if inner.kind() == "start_tag" {
                     let full_tag = inner.utf8_text(content.as_bytes()).ok().unwrap_or("");
                     // Attrs = everything between <tag and >
@@ -268,7 +268,7 @@ fn extract_section_with_attrs_ts_html(content: &str, tag: &str) -> Option<(Strin
 
         // Extract body (raw_text for script/style, or text content for template)
         for j in 0..child.child_count() {
-            if let Some(inner) = child.child(j) {
+            if let Some(inner) = child.child(j as u32) {
                 if inner.kind() == "raw_text" || inner.kind() == "text" {
                     let body = inner.utf8_text(content.as_bytes()).ok()?.to_string();
                     return Some((attrs, body));
@@ -278,11 +278,11 @@ fn extract_section_with_attrs_ts_html(content: &str, tag: &str) -> Option<(Strin
 
         // For template: the body is everything between start_tag and end_tag
         let start_tag_end = (0..child.child_count())
-            .filter_map(|j| child.child(j))
+            .filter_map(|j| child.child(j as u32))
             .find(|n| n.kind() == "start_tag")
             .map(|n| n.end_byte());
         let end_tag_start = (0..child.child_count())
-            .filter_map(|j| child.child(j))
+            .filter_map(|j| child.child(j as u32))
             .find(|n| n.kind() == "end_tag")
             .map(|n| n.start_byte());
 
@@ -387,7 +387,7 @@ fn find_define_props_calls(node: Node, source: &[u8], props: &mut Vec<PropInfo>)
 
     // Recurse through children
     for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
+        if let Some(child) = node.child(i as u32) {
             find_define_props_calls(child, source, props);
         }
     }
@@ -403,7 +403,7 @@ fn extract_props_from_call(node: Node, source: &[u8], props: &mut Vec<PropInfo>)
     // defineProps({ msg: String, count: Number })
     if let Some(args_node) = node.child_by_field_name("arguments") {
         for i in 0..args_node.child_count() {
-            if let Some(arg) = args_node.child(i) {
+            if let Some(arg) = args_node.child(i as u32) {
                 if arg.kind() == "object" {
                     extract_props_from_runtime_object(arg, source, props);
                 } else if arg.kind() == "array" {
@@ -421,7 +421,7 @@ fn extract_props_from_with_defaults(node: Node, source: &[u8], props: &mut Vec<P
         let mut defaults_node = None;
 
         for i in 0..args_node.child_count() {
-            if let Some(arg) = args_node.child(i) {
+            if let Some(arg) = args_node.child(i as u32) {
                 if arg.kind() == "call_expression" {
                     if let Some(func) = arg.child_by_field_name("function") {
                         if func.utf8_text(source).unwrap_or("") == "defineProps" {
@@ -447,7 +447,7 @@ fn extract_props_from_with_defaults(node: Node, source: &[u8], props: &mut Vec<P
 fn extract_props_from_type_object(type_args: Node, source: &[u8], props: &mut Vec<PropInfo>) {
     // <{ msg: string, count?: number }>
     for i in 0..type_args.child_count() {
-        if let Some(child) = type_args.child(i) {
+        if let Some(child) = type_args.child(i as u32) {
             if child.kind() == "object_type" || child.kind() == "type_literal" {
                 extract_props_from_type_literal(child, source, props);
             }
@@ -458,7 +458,7 @@ fn extract_props_from_type_object(type_args: Node, source: &[u8], props: &mut Ve
 fn extract_props_from_type_literal(obj: Node, source: &[u8], props: &mut Vec<PropInfo>) {
     // Parse property_signature nodes: msg: string, count?: number
     for i in 0..obj.child_count() {
-        if let Some(prop) = obj.child(i) {
+        if let Some(prop) = obj.child(i as u32) {
             if prop.kind() == "property_signature" {
                 let mut name = String::new();
                 let mut prop_type = None;
@@ -471,11 +471,11 @@ fn extract_props_from_type_literal(obj: Node, source: &[u8], props: &mut Vec<Pro
 
                 // Check if optional (has ? token)
                 for j in 0..prop.child_count() {
-                    if let Some(child) = prop.child(j) {
+                    if let Some(child) = prop.child(j as u32) {
                         if child.kind() == "?" {
                             required = false;
                         } else if child.kind() == "type_annotation" {
-                            if let Some(type_node) = child.child(1) {
+                            if let Some(type_node) = child.child(1 as u32) {
                                 prop_type =
                                     Some(type_node.utf8_text(source).unwrap_or("any").to_string());
                             }
@@ -499,7 +499,7 @@ fn extract_props_from_type_literal(obj: Node, source: &[u8], props: &mut Vec<Pro
 fn extract_props_from_runtime_object(obj: Node, source: &[u8], props: &mut Vec<PropInfo>) {
     // defineProps({ msg: String, count: { type: Number, required: true } })
     for i in 0..obj.child_count() {
-        if let Some(pair) = obj.child(i) {
+        if let Some(pair) = obj.child(i as u32) {
             if pair.kind() == "pair" {
                 let mut name = String::new();
                 let mut prop_type = None;
@@ -519,7 +519,7 @@ fn extract_props_from_runtime_object(obj: Node, source: &[u8], props: &mut Vec<P
                     } else if value.kind() == "object" {
                         // Complex: { type: Number, required: true, default: 0 }
                         for j in 0..value.child_count() {
-                            if let Some(inner_pair) = value.child(j) {
+                            if let Some(inner_pair) = value.child(j as u32) {
                                 if inner_pair.kind() == "pair" {
                                     if let Some(inner_key) = inner_pair.child_by_field_name("key") {
                                         let key_text = inner_key.utf8_text(source).unwrap_or("");
@@ -559,7 +559,7 @@ fn extract_props_from_runtime_object(obj: Node, source: &[u8], props: &mut Vec<P
 fn extract_props_from_array(arr: Node, source: &[u8], props: &mut Vec<PropInfo>) {
     // defineProps(['msg', 'count'])
     for i in 0..arr.child_count() {
-        if let Some(item) = arr.child(i) {
+        if let Some(item) = arr.child(i as u32) {
             if item.kind() == "string" {
                 let text = item.utf8_text(source).unwrap_or("");
                 let name = text.trim_matches(|c| c == '"' || c == '\'');
@@ -576,7 +576,7 @@ fn extract_props_from_array(arr: Node, source: &[u8], props: &mut Vec<PropInfo>)
 
 fn apply_defaults_from_object(props: &mut [PropInfo], defaults_obj: Node, source: &[u8]) {
     for i in 0..defaults_obj.child_count() {
-        if let Some(pair) = defaults_obj.child(i) {
+        if let Some(pair) = defaults_obj.child(i as u32) {
             if pair.kind() == "pair" {
                 if let Some(key) = pair.child_by_field_name("key") {
                     let key_text = key.utf8_text(source).unwrap_or("");
@@ -603,7 +603,7 @@ fn find_options_api_props(node: Node, source: &[u8], props: &mut Vec<PropInfo>) 
     }
 
     for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
+        if let Some(child) = node.child(i as u32) {
             find_options_api_props(child, source, props);
         }
     }
@@ -612,7 +612,7 @@ fn find_options_api_props(node: Node, source: &[u8], props: &mut Vec<PropInfo>) 
 fn find_props_in_object(node: Node, source: &[u8], props: &mut Vec<PropInfo>) {
     if node.kind() == "object" {
         for i in 0..node.child_count() {
-            if let Some(pair) = node.child(i) {
+            if let Some(pair) = node.child(i as u32) {
                 if pair.kind() == "pair" {
                     if let Some(key) = pair.child_by_field_name("key") {
                         if key.utf8_text(source).unwrap_or("") == "props" {
@@ -699,7 +699,7 @@ fn find_define_emits_calls(node: Node, source: &[u8], emits: &mut Vec<String>) {
                 // Check for array argument
                 if let Some(args) = node.child_by_field_name("arguments") {
                     for i in 0..args.child_count() {
-                        if let Some(arg) = args.child(i) {
+                        if let Some(arg) = args.child(i as u32) {
                             if arg.kind() == "array" {
                                 extract_emits_from_array(arg, source, emits);
                             }
@@ -711,7 +711,7 @@ fn find_define_emits_calls(node: Node, source: &[u8], emits: &mut Vec<String>) {
     }
 
     for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
+        if let Some(child) = node.child(i as u32) {
             find_define_emits_calls(child, source, emits);
         }
     }
@@ -720,7 +720,7 @@ fn find_define_emits_calls(node: Node, source: &[u8], emits: &mut Vec<String>) {
 fn extract_emits_from_type(type_args: Node, source: &[u8], emits: &mut Vec<String>) {
     // <{ (e: 'submit', val: any): void; ... }> or <{ submit: [...] }>
     for i in 0..type_args.child_count() {
-        if let Some(child) = type_args.child(i) {
+        if let Some(child) = type_args.child(i as u32) {
             if child.kind() == "object_type" || child.kind() == "type_literal" {
                 extract_emits_from_type_literal(child, source, emits);
             }
@@ -730,7 +730,7 @@ fn extract_emits_from_type(type_args: Node, source: &[u8], emits: &mut Vec<Strin
 
 fn extract_emits_from_type_literal(obj: Node, source: &[u8], emits: &mut Vec<String>) {
     for i in 0..obj.child_count() {
-        if let Some(item) = obj.child(i) {
+        if let Some(item) = obj.child(i as u32) {
             // Look for string literals in function signatures or property names
             if item.kind() == "call_signature" || item.kind() == "method_signature" {
                 extract_strings_from_node(item, source, emits);
@@ -756,7 +756,7 @@ fn extract_strings_from_node(node: Node, source: &[u8], emits: &mut Vec<String>)
     }
 
     for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
+        if let Some(child) = node.child(i as u32) {
             extract_strings_from_node(child, source, emits);
         }
     }
@@ -764,7 +764,7 @@ fn extract_strings_from_node(node: Node, source: &[u8], emits: &mut Vec<String>)
 
 fn extract_emits_from_array(arr: Node, source: &[u8], emits: &mut Vec<String>) {
     for i in 0..arr.child_count() {
-        if let Some(item) = arr.child(i) {
+        if let Some(item) = arr.child(i as u32) {
             if item.kind() == "string" {
                 let text = item.utf8_text(source).unwrap_or("");
                 let clean = text.trim_matches(|c| c == '"' || c == '\'');
@@ -782,7 +782,7 @@ fn find_options_api_emits(node: Node, source: &[u8], emits: &mut Vec<String>) {
     }
 
     for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
+        if let Some(child) = node.child(i as u32) {
             find_options_api_emits(child, source, emits);
         }
     }
@@ -791,7 +791,7 @@ fn find_options_api_emits(node: Node, source: &[u8], emits: &mut Vec<String>) {
 fn find_emits_in_object(node: Node, source: &[u8], emits: &mut Vec<String>) {
     if node.kind() == "object" {
         for i in 0..node.child_count() {
-            if let Some(pair) = node.child(i) {
+            if let Some(pair) = node.child(i as u32) {
                 if pair.kind() == "pair" {
                     if let Some(key) = pair.child_by_field_name("key") {
                         if key.utf8_text(source).unwrap_or("") == "emits" {

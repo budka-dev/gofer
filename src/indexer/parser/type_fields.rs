@@ -114,7 +114,7 @@ fn extract_rust_struct_fields(
     type_name: &str,
 ) -> Result<Vec<TypeField>> {
     for i in 0..root.child_count() {
-        let Some(node) = root.child(i) else { continue };
+        let Some(node) = root.child(i as u32) else { continue };
         if node.kind() == "struct_item" {
             if let Some(name_node) = node.child_by_field_name("name") {
                 if &code[name_node.byte_range()] == type_name {
@@ -132,7 +132,7 @@ fn collect_all_rust_structs(
     results: &mut Vec<(String, Vec<TypeField>)>,
 ) {
     for i in 0..root.child_count() {
-        let Some(node) = root.child(i) else { continue };
+        let Some(node) = root.child(i as u32) else { continue };
         if node.kind() == "struct_item" {
             if let Some(name_node) = node.child_by_field_name("name") {
                 let name = code[name_node.byte_range()].to_string();
@@ -151,7 +151,7 @@ fn extract_fields_from_rust_struct(node: Node<'_>, code: &str) -> Vec<TypeField>
     // Ищем field_declaration_list
     if let Some(body) = node.child_by_field_name("body") {
         for i in 0..body.child_count() {
-            let Some(child) = body.child(i) else { continue };
+            let Some(child) = body.child(i as u32) else { continue };
             if child.kind() == "field_declaration" {
                 if let Some(name_node) = child.child_by_field_name("name") {
                     let name = code[name_node.byte_range()].to_string();
@@ -180,7 +180,7 @@ fn extract_ts_interface_fields(
     type_name: &str,
 ) -> Result<Vec<TypeField>> {
     for i in 0..root.child_count() {
-        let Some(node) = root.child(i) else { continue };
+        let Some(node) = root.child(i as u32) else { continue };
         let kind = node.kind();
 
         // interface_declaration, type_alias_declaration
@@ -194,7 +194,7 @@ fn extract_ts_interface_fields(
         // export_statement может обёртывать
         if kind == "export_statement" {
             for j in 0..node.child_count() {
-                let Some(inner) = node.child(j) else { continue };
+                let Some(inner) = node.child(j as u32) else { continue };
                 if inner.kind() == "interface_declaration"
                     || inner.kind() == "type_alias_declaration"
                 {
@@ -216,7 +216,7 @@ fn collect_all_ts_interfaces(
     results: &mut Vec<(String, Vec<TypeField>)>,
 ) {
     for i in 0..root.child_count() {
-        let Some(node) = root.child(i) else { continue };
+        let Some(node) = root.child(i as u32) else { continue };
         collect_ts_interface_recursive(node, code, results);
     }
 }
@@ -242,7 +242,7 @@ fn collect_ts_interface_recursive(
     // Рекурсия для export_statement и прочих обёрток
     if kind == "export_statement" || kind == "program" {
         for i in 0..node.child_count() {
-            if let Some(child) = node.child(i) {
+            if let Some(child) = node.child(i as u32) {
                 collect_ts_interface_recursive(child, code, results);
             }
         }
@@ -258,7 +258,7 @@ fn extract_fields_from_ts_node(node: Node<'_>, code: &str) -> Vec<TypeField> {
             return Some(node);
         }
         for i in 0..node.child_count() {
-            if let Some(child) = node.child(i) {
+            if let Some(child) = node.child(i as u32) {
                 if let Some(found) = find_body(child) {
                     return Some(found);
                 }
@@ -272,7 +272,7 @@ fn extract_fields_from_ts_node(node: Node<'_>, code: &str) -> Vec<TypeField> {
     };
 
     for i in 0..body.child_count() {
-        let Some(child) = body.child(i) else { continue };
+        let Some(child) = body.child(i as u32) else { continue };
         // property_signature (interface) или property_type (object_type literal)
         if child.kind() == "property_signature" || child.kind() == "property_identifier" {
             if let Some(name_node) = child.child_by_field_name("name") {
@@ -301,14 +301,14 @@ fn extract_python_class_fields(
     type_name: &str,
 ) -> Result<Vec<TypeField>> {
     for i in 0..root.child_count() {
-        let Some(node) = root.child(i) else { continue };
+        let Some(node) = root.child(i as u32) else { continue };
         let kind = node.kind();
 
         if kind == "class_definition" || kind == "decorated_definition" {
             let class_node = if kind == "decorated_definition" {
                 // Ищем class_definition внутри
                 (0..node.child_count())
-                    .filter_map(|j| node.child(j))
+                    .filter_map(|j| node.child(j as u32))
                     .find(|c| c.kind() == "class_definition")
             } else {
                 Some(node)
@@ -334,12 +334,12 @@ fn collect_all_python_classes(
     results: &mut Vec<(String, Vec<TypeField>)>,
 ) {
     for i in 0..root.child_count() {
-        let Some(node) = root.child(i) else { continue };
+        let Some(node) = root.child(i as u32) else { continue };
         let kind = node.kind();
 
         let class_node = if kind == "decorated_definition" {
             (0..node.child_count())
-                .filter_map(|j| node.child(j))
+                .filter_map(|j| node.child(j as u32))
                 .find(|c| c.kind() == "class_definition")
         } else if kind == "class_definition" {
             Some(node)
@@ -369,19 +369,19 @@ fn extract_fields_from_python_class(class_node: Node<'_>, code: &str) -> Vec<Typ
     };
 
     for i in 0..body.child_count() {
-        let Some(child) = body.child(i) else { continue };
+        let Some(child) = body.child(i as u32) else { continue };
 
         // type: expression, e.g. `name: str`
         if child.kind() == "expression_statement" {
-            if let Some(expr) = child.child(0) {
+            if let Some(expr) = child.child(0 as u32) {
                 if expr.kind() == "type" || expr.kind() == "assignment" {
                     // type annotation: `field: Type`
-                    if let Some(name_node) = expr.child(0) {
+                    if let Some(name_node) = expr.child(0 as u32) {
                         if name_node.kind() == "identifier" {
                             let name = code[name_node.byte_range()].to_string();
                             if !name.starts_with('_') {
                                 let field_type =
-                                    expr.child(2).map(|t| code[t.byte_range()].to_string());
+                                    expr.child(2 as u32).map(|t| code[t.byte_range()].to_string());
                                 let normalized = normalize_field(&name);
                                 fields.push(TypeField {
                                     name,
@@ -401,10 +401,10 @@ fn extract_fields_from_python_class(class_node: Node<'_>, code: &str) -> Vec<Typ
 
 fn extract_go_struct_fields(root: Node<'_>, code: &str, type_name: &str) -> Result<Vec<TypeField>> {
     for i in 0..root.child_count() {
-        let Some(node) = root.child(i) else { continue };
+        let Some(node) = root.child(i as u32) else { continue };
         if node.kind() == "type_declaration" {
             for j in 0..node.child_count() {
-                let Some(spec) = node.child(j) else { continue };
+                let Some(spec) = node.child(j as u32) else { continue };
                 if spec.kind() == "type_spec" {
                     if let Some(name_node) = spec.child_by_field_name("name") {
                         if &code[name_node.byte_range()] == type_name {
@@ -424,10 +424,10 @@ fn extract_go_struct_fields(root: Node<'_>, code: &str, type_name: &str) -> Resu
 
 fn collect_all_go_structs(root: Node<'_>, code: &str, results: &mut Vec<(String, Vec<TypeField>)>) {
     for i in 0..root.child_count() {
-        let Some(node) = root.child(i) else { continue };
+        let Some(node) = root.child(i as u32) else { continue };
         if node.kind() == "type_declaration" {
             for j in 0..node.child_count() {
-                let Some(spec) = node.child(j) else { continue };
+                let Some(spec) = node.child(j as u32) else { continue };
                 if spec.kind() == "type_spec" {
                     if let Some(name_node) = spec.child_by_field_name("name") {
                         let name = code[name_node.byte_range()].to_string();
@@ -455,7 +455,7 @@ fn extract_fields_from_go_struct(struct_node: Node<'_>, code: &str) -> Vec<TypeF
     } else {
         // Some tree-sitter-go versions: struct_type children include field_declaration directly
         for i in 0..struct_node.child_count() {
-            let Some(child) = struct_node.child(i) else {
+            let Some(child) = struct_node.child(i as u32) else {
                 continue;
             };
             if child.kind() == "field_declaration_list" {
@@ -469,7 +469,7 @@ fn extract_fields_from_go_struct(struct_node: Node<'_>, code: &str) -> Vec<TypeF
 
 fn extract_go_fields_from_body(body: Node<'_>, code: &str, fields: &mut Vec<TypeField>) {
     for i in 0..body.child_count() {
-        let Some(child) = body.child(i) else { continue };
+        let Some(child) = body.child(i as u32) else { continue };
         if child.kind() == "field_declaration" {
             // field_declaration: name type [tag]
             if let Some(name_node) = child.child_by_field_name("name") {

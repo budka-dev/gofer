@@ -439,11 +439,11 @@ impl CodeParser {
                 let root = tree.root_node();
                 // Walk children looking for <script> element
                 for i in 0..root.child_count() {
-                    if let Some(child) = root.child(i) {
+                    if let Some(child) = root.child(i as u32) {
                         if child.kind() == "script_element" {
                             // Find the raw_text child (script body)
                             for j in 0..child.child_count() {
-                                if let Some(inner) = child.child(j) {
+                                if let Some(inner) = child.child(j as u32) {
                                     if inner.kind() == "raw_text" {
                                         let script_content =
                                             inner.utf8_text(content.as_bytes()).ok()?.to_string();
@@ -750,7 +750,7 @@ impl CodeParser {
         while let Some(node) = stack.pop() {
             if node.kind() == "start_tag" || node.kind() == "self_closing_tag" {
                 // First child of a tag is the tag_name
-                if let Some(tag_name_node) = node.child(1) {
+                if let Some(tag_name_node) = node.child(1 as u32) {
                     if tag_name_node.kind() == "tag_name" {
                         if let Ok(tag_name) = tag_name_node.utf8_text(content.as_bytes()) {
                             // Custom components: PascalCase or contains hyphen (kebab-case)
@@ -775,7 +775,7 @@ impl CodeParser {
 
             // Traverse children
             for i in 0..node.child_count() {
-                if let Some(child) = node.child(i) {
+                if let Some(child) = node.child(i as u32) {
                     stack.push(child);
                 }
             }
@@ -898,7 +898,7 @@ impl CodeParser {
     fn collect_rust_imports(root: Node<'_>, code: &[u8]) -> Vec<ImportInfo> {
         let mut imports = Vec::new();
         for i in 0..root.child_count() {
-            let child = match root.child(i) {
+            let child = match root.child(i as u32) {
                 Some(c) => c,
                 None => continue,
             };
@@ -983,7 +983,7 @@ impl CodeParser {
             // The list `{A, B, C}` inside scoped_use_list
             "use_list" => {
                 for j in 0..node.child_count() {
-                    if let Some(child) = node.child(j) {
+                    if let Some(child) = node.child(j as u32) {
                         if child.is_named() {
                             Self::walk_rust_use(child, code, prefix, line, out);
                         }
@@ -993,7 +993,7 @@ impl CodeParser {
             // `use foo as bar;`
             "use_as_clause" => {
                 // The first named child is the original name
-                if let Some(orig) = node.named_child(0) {
+                if let Some(orig) = node.named_child(0 as u32) {
                     Self::walk_rust_use(orig, code, prefix, line, out);
                 }
             }
@@ -1023,7 +1023,7 @@ impl CodeParser {
     fn collect_ts_imports(root: Node<'_>, code: &[u8]) -> Vec<ImportInfo> {
         let mut imports = Vec::new();
         for i in 0..root.child_count() {
-            let child = match root.child(i) {
+            let child = match root.child(i as u32) {
                 Some(c) => c,
                 None => continue,
             };
@@ -1065,7 +1065,7 @@ impl CodeParser {
 
     fn walk_ts_import_clause(node: Node<'_>, code: &[u8], items: &mut Vec<String>) {
         for j in 0..node.child_count() {
-            let child = match node.child(j) {
+            let child = match node.child(j as u32) {
                 Some(c) => c,
                 None => continue,
             };
@@ -1080,7 +1080,7 @@ impl CodeParser {
                 "namespace_import" => {
                     // the alias identifier
                     for k in 0..child.child_count() {
-                        if let Some(id) = child.child(k) {
+                        if let Some(id) = child.child(k as u32) {
                             if id.kind() == "identifier" {
                                 if let Ok(t) = id.utf8_text(code) {
                                     items.push(t.to_string());
@@ -1092,7 +1092,7 @@ impl CodeParser {
                 // `import { A, B as C } from '...'`
                 "named_imports" => {
                     for k in 0..child.named_child_count() {
-                        if let Some(spec) = child.named_child(k) {
+                        if let Some(spec) = child.named_child(k as u32) {
                             // import_specifier has name: and (optional) alias:
                             let name = spec
                                 .child_by_field_name("name")
@@ -1121,7 +1121,7 @@ impl CodeParser {
 
     fn walk_python_imports(node: Node<'_>, code: &[u8], out: &mut Vec<ImportInfo>) {
         for i in 0..node.child_count() {
-            let child = match node.child(i) {
+            let child = match node.child(i as u32) {
                 Some(c) => c,
                 None => continue,
             };
@@ -1130,7 +1130,7 @@ impl CodeParser {
                     // `import foo`, `import foo.bar`, `import foo as f`
                     let line = child.start_position().row as u32;
                     for j in 0..child.named_child_count() {
-                        if let Some(name_node) = child.named_child(j) {
+                        if let Some(name_node) = child.named_child(j as u32) {
                             let raw = name_node.utf8_text(code).unwrap_or("");
                             // aliased_import: `import foo as f` — take the dotted_name
                             let path = if name_node.kind() == "aliased_import" {
@@ -1168,7 +1168,7 @@ impl CodeParser {
                     let mut items = Vec::new();
                     // Collect imported names after "import"
                     for j in 0..child.named_child_count() {
-                        if let Some(n) = child.named_child(j) {
+                        if let Some(n) = child.named_child(j as u32) {
                             match n.kind() {
                                 "dotted_name" | "identifier" => {
                                     // Skip the module_name node (it appears before "import")
@@ -1237,7 +1237,7 @@ impl CodeParser {
 
         // Go source_file has top-level import_declaration nodes
         for i in 0..root.child_count() {
-            let child = match root.child(i) {
+            let child = match root.child(i as u32) {
                 Some(c) => c,
                 None => continue,
             };
@@ -1246,14 +1246,14 @@ impl CodeParser {
             }
             // Single import: `import "fmt"` or grouped: `import ( "fmt" \n "os" )`
             for j in 0..child.named_child_count() {
-                if let Some(spec) = child.named_child(j) {
+                if let Some(spec) = child.named_child(j as u32) {
                     match spec.kind() {
                         "import_spec" => {
                             Self::push_go_import_spec(spec, code, &mut imports);
                         }
                         "import_spec_list" => {
                             for k in 0..spec.named_child_count() {
-                                if let Some(inner) = spec.named_child(k) {
+                                if let Some(inner) = spec.named_child(k as u32) {
                                     if inner.kind() == "import_spec" {
                                         Self::push_go_import_spec(inner, code, &mut imports);
                                     }

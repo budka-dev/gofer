@@ -92,7 +92,7 @@ fn collect_rust_bodies(node: Node<'_>, _code: &str, replacements: &mut Vec<(usiz
         // impl_item — рекурсируем внутрь, чтобы найти вложенные function_item
         "impl_item" | "trait_item" => {
             for i in 0..node.child_count() {
-                if let Some(child) = node.child(i) {
+                if let Some(child) = node.child(i as u32) {
                     collect_rust_bodies(child, _code, replacements);
                 }
             }
@@ -101,7 +101,7 @@ fn collect_rust_bodies(node: Node<'_>, _code: &str, replacements: &mut Vec<(usiz
         // declaration_list внутри impl/trait
         "declaration_list" => {
             for i in 0..node.child_count() {
-                if let Some(child) = node.child(i) {
+                if let Some(child) = node.child(i as u32) {
                     collect_rust_bodies(child, _code, replacements);
                 }
             }
@@ -112,7 +112,7 @@ fn collect_rust_bodies(node: Node<'_>, _code: &str, replacements: &mut Vec<(usiz
 
     // Рекурсия для верхнеуровневых узлов (mod, source_file)
     for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
+        if let Some(child) = node.child(i as u32) {
             collect_rust_bodies(child, _code, replacements);
         }
     }
@@ -143,7 +143,7 @@ fn collect_ts_bodies(node: Node<'_>, _code: &str, replacements: &mut Vec<(usize,
         // class_body — рекурсируем внутрь для методов
         "class_body" => {
             for i in 0..node.child_count() {
-                if let Some(child) = node.child(i) {
+                if let Some(child) = node.child(i as u32) {
                     collect_ts_bodies(child, _code, replacements);
                 }
             }
@@ -154,7 +154,7 @@ fn collect_ts_bodies(node: Node<'_>, _code: &str, replacements: &mut Vec<(usize,
 
     // Рекурсия для верхнеуровневых узлов
     for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
+        if let Some(child) = node.child(i as u32) {
             collect_ts_bodies(child, _code, replacements);
         }
     }
@@ -180,7 +180,7 @@ fn collect_python_bodies(
         // decorated_definition — рекурсируем внутрь
         "decorated_definition" => {
             for i in 0..node.child_count() {
-                if let Some(child) = node.child(i) {
+                if let Some(child) = node.child(i as u32) {
                     collect_python_bodies(child, _code, replacements);
                 }
             }
@@ -190,7 +190,7 @@ fn collect_python_bodies(
         "class_definition" => {
             if let Some(body) = node.child_by_field_name("body") {
                 for i in 0..body.child_count() {
-                    if let Some(child) = body.child(i) {
+                    if let Some(child) = body.child(i as u32) {
                         collect_python_bodies(child, _code, replacements);
                     }
                 }
@@ -201,7 +201,7 @@ fn collect_python_bodies(
     }
 
     for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
+        if let Some(child) = node.child(i as u32) {
             collect_python_bodies(child, _code, replacements);
         }
     }
@@ -266,7 +266,7 @@ fn collect_go_bodies(node: Node<'_>, _code: &str, replacements: &mut Vec<(usize,
     }
 
     for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
+        if let Some(child) = node.child(i as u32) {
             collect_go_bodies(child, _code, replacements);
         }
     }
