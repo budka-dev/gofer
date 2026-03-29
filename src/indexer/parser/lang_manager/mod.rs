@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use thiserror::Error;
 use tree_sitter::{Language, WasmError, WasmStore};
@@ -22,28 +21,83 @@ pub enum LangManagerError {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ManifestComments {
+    #[serde(default)]
+    pub line: Option<String>,
+    #[serde(default)]
+    pub block: Option<Vec<String>>,
+    #[serde(default)]
+    pub doc: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ManifestLanguage {
     pub name: String,
     pub extensions: Vec<String>,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    #[serde(default)]
+    pub root_markers: Vec<String>,
+    #[serde(default)]
+    pub comments: Option<ManifestComments>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ManifestParser {
     pub r#type: String,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub repo: Option<String>,
+    #[serde(default)]
     pub download_url: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ManifestLsp {
-    pub name: String,
-    pub download_url: String,
-    pub command: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub download_url: Option<String>,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub tool: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub init_options: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ManifestSandbox {
     pub compile_cmd: String,
     pub run_cmd: String,
+    #[serde(default)]
+    pub package_manager: Option<String>,
+    #[serde(default)]
+    pub test: Option<Vec<String>>,
+    #[serde(default)]
+    pub build: Option<Vec<String>>,
+    #[serde(default)]
+    pub run: Option<Vec<String>>,
+    #[serde(default)]
+    pub script: Option<Vec<String>>,
+    #[serde(default)]
+    pub repl: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ManifestFormatLint {
+    pub tool: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ManifestIndexer {
+    #[serde(default)]
+    pub ignore_folders: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -52,46 +106,95 @@ pub struct LangManifest {
     pub parser: ManifestParser,
     pub lsp: Option<ManifestLsp>,
     pub sandbox: Option<ManifestSandbox>,
+    pub indexer: Option<ManifestIndexer>,
+    pub formatter: Option<ManifestFormatLint>,
+    pub linter: Option<ManifestFormatLint>,
 }
 
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ToolManifestBinary {
+    pub url: String,
+    pub executable_name: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ToolInstall {
+    pub binary: ToolManifestBinary,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ToolManifestConfig {
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ToolManifestInfo {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    pub install: Option<ToolInstall>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ToolManifest {
+    pub tool: ToolManifestInfo,
+    pub linter: Option<ToolManifestConfig>,
+    pub formatter: Option<ToolManifestConfig>,
+    pub lsp: Option<ToolManifestConfig>,
+}
+
+#[derive(Clone)]
 pub struct LoadedLanguage {
     pub manifest: LangManifest,
     pub language: Language,
-    pub symbols_query: String,
-    pub references_query: String,
+    pub queries: Arc<std::collections::HashMap<String, Arc<tree_sitter::Query>>>,
 }
 
 pub struct LanguageManager {
     /// Mapping of language name to LoadedLanguage
-    loaded_langs: Arc<dashmap::DashMap<String, LoadedLanguage>>,
+    pub loaded_langs: Arc<dashmap::DashMap<String, Arc<LoadedLanguage>>>,
+    /// Mapping of tool name to ToolManifest
+    pub loaded_tools: Arc<dashmap::DashMap<String, Arc<ToolManifest>>>,
     /// Extension to language name mapping (e.g., "rs" -> "rust")
-    ext_to_lang: Arc<dashmap::DashMap<String, String>>,
+    pub ext_to_lang: Arc<dashmap::DashMap<String, String>>,
     /// Directory where language packs are stored (e.g., ~/.gofer/langs)
-    langs_dir: PathBuf,
+    pub langs_dir: PathBuf,
+    /// Directory where tool configs are stored (e.g., ~/.gofer/tools)
+    pub tools_dir: PathBuf,
     /// Shared WebAssembly engine for compiling parsers
-    engine: tree_sitter::wasmtime::Engine,
+    pub engine: tree_sitter::wasmtime::Engine,
+    /// Prevents concurrent downloads of the same language
+    pub download_locks: Arc<dashmap::DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl LanguageManager {
-    pub fn new(langs_dir: Option<PathBuf>) -> Result<Self, LangManagerError> {
-        let langs_dir = langs_dir.unwrap_or_else(|| {
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".gofer")
-                .join("langs")
-        });
+    pub fn new(langs_dir: Option<PathBuf>, tools_dir: Option<PathBuf>) -> Result<Self, LangManagerError> {
+        let base_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".gofer");
+        
+        let langs_dir = langs_dir.unwrap_or_else(|| base_dir.join("langs"));
+        let tools_dir = tools_dir.unwrap_or_else(|| base_dir.join("tools"));
 
         if !langs_dir.exists() {
             std::fs::create_dir_all(&langs_dir)?;
+        }
+        if !tools_dir.exists() {
+            std::fs::create_dir_all(&tools_dir)?;
         }
 
         let engine = tree_sitter::wasmtime::Engine::default();
 
         Ok(Self {
             loaded_langs: Arc::new(dashmap::DashMap::new()),
+            loaded_tools: Arc::new(dashmap::DashMap::new()),
             ext_to_lang: Arc::new(dashmap::DashMap::new()),
             langs_dir,
+            tools_dir,
             engine,
+            download_locks: Arc::new(dashmap::DashMap::new()),
         })
     }
 
@@ -111,7 +214,9 @@ impl LanguageManager {
                     if manifest_path.exists() {
                         if let Ok(content) = std::fs::read_to_string(&manifest_path) {
                             if let Ok(manifest) = toml::from_str::<LangManifest>(&content) {
-                                if manifest.language.extensions.iter().any(|e| e == ext) {
+                                if manifest.language.extensions.iter().any(|e| e == ext) 
+                                    || manifest.language.aliases.iter().any(|a| a == ext)
+                                    || manifest.language.name == ext {
                                     // Found a match! Load it.
                                     let lang_name = manifest.language.name.clone();
                                     if self.load_language_from_disk(&lang_name).is_ok() {
@@ -127,23 +232,74 @@ impl LanguageManager {
         None
     }
 
-    /// Gets the loaded language structure. 
-    pub fn get_language(&self, lang_name: &str) -> Option<LoadedLanguage> {
-        // Since we cannot return a reference to dashmap easily without holding a lock guard,
-        // we might need to clone, but `Language` is just a pointer inside, so we can clone it.
-        // But for queries, we'd need to clone strings.
-        // Let's implement a pattern where we return an owned copy or Arc.
-        // For simplicity now, let's just clone.
+    /// Gets the loaded language structure. Will attempt to load from disk and download if missing.
+    pub fn get_language(&self, lang_name: &str) -> Option<Arc<LoadedLanguage>> {
         if let Some(entry) = self.loaded_langs.get(lang_name) {
-            Some(LoadedLanguage {
-                manifest: entry.manifest.clone(),
-                language: entry.language.clone(),
-                symbols_query: entry.symbols_query.clone(),
-                references_query: entry.references_query.clone(),
-            })
-        } else {
-            None
+            return Some(entry.value().clone());
         }
+
+        // Try to load from disk
+        match self.load_language_from_disk(lang_name) {
+            Ok(_) => {
+                if let Some(entry) = self.loaded_langs.get(lang_name) {
+                    return Some(entry.value().clone());
+                }
+            }
+            Err(LangManagerError::LanguageNotFound(_)) => {
+                // Proceed to download
+            }
+            Err(e) => {
+                tracing::error!("Language '{}' exists but failed to load (ABI mismatch or corrupted file?): {:?}", lang_name, e);
+                return None;
+            }
+        }
+
+        let lock = self.download_locks
+            .entry(lang_name.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+
+        // Not on disk, try to auto-download from GitHub
+        tracing::info!("Language {} not found locally, auto-downloading from lang-hub...", lang_name);
+        
+        // Helper block to safely run async code and avoid data races
+        let install_func = || async {
+            let _guard = lock.lock().await;
+            // Check if another thread downloaded it while we were waiting
+            if self.loaded_langs.contains_key(lang_name) {
+                return Ok(());
+            }
+            self.install_from_github(lang_name).await
+        };
+
+        let handle = tokio::runtime::Handle::try_current();
+        let res = match handle {
+            Ok(h) => {
+                tokio::task::block_in_place(|| {
+                    h.block_on(install_func())
+                })
+            }
+            Err(_) => {
+                if let Ok(rt) = tokio::runtime::Runtime::new() {
+                    rt.block_on(install_func())
+                } else {
+                    Err(LangManagerError::EngineError("Failed to create tokio runtime".to_string()))
+                }
+            }
+        };
+
+        if let Err(e) = res {
+            tracing::error!("Failed to auto-download language {}: {}", lang_name, e);
+            return None;
+        }
+
+        // Now load from disk again
+        if let Err(e) = self.load_language_from_disk(lang_name) {
+            tracing::error!("Failed to load language {} after download: {}", lang_name, e);
+            return None;
+        }
+
+        self.loaded_langs.get(lang_name).map(|entry| entry.value().clone())
     }
 
     /// Loads a language pack from disk (assumes it is already downloaded)
@@ -174,34 +330,272 @@ impl LanguageManager {
         let language = store.load_language(&manifest.language.name, &wasm_bytes)?;
 
         let queries_dir = lang_dir.join("queries");
-        let symbols_query = std::fs::read_to_string(queries_dir.join("symbols.scm")).unwrap_or_default();
-        let references_query = std::fs::read_to_string(queries_dir.join("references.scm")).unwrap_or_default();
+        let mut queries = std::collections::HashMap::new();
 
-        let loaded = LoadedLanguage {
+        if queries_dir.exists() {
+            if let Ok(entries) = std::fs::read_dir(&queries_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().and_then(|e| e.to_str()) == Some("scm") {
+                        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                            if let Ok(query_str) = std::fs::read_to_string(&path) {
+                                match tree_sitter::Query::new(&language, &query_str) {
+                                    Ok(q) => {
+                                        queries.insert(stem.to_string(), Arc::new(q));
+                                    }
+                                    Err(e) => tracing::warn!("Failed to compile query {}: {}", stem, e),
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let loaded = Arc::new(LoadedLanguage {
             manifest: manifest.clone(),
             language,
-            symbols_query,
-            references_query,
-        };
+            queries: Arc::new(queries),
+        });
 
         self.loaded_langs.insert(lang_name.to_string(), loaded);
         
         for ext in manifest.language.extensions {
             self.ext_to_lang.insert(ext, lang_name.to_string());
         }
+        for alias in manifest.language.aliases {
+            self.ext_to_lang.insert(alias, lang_name.to_string());
+        }
+        self.ext_to_lang.insert(manifest.language.name, lang_name.to_string());
 
         tracing::info!("Successfully loaded language plugin: {}", lang_name);
 
         Ok(())
     }
 
-    /// Installs a language pack from a git repo or direct URL.
-    /// In the future, this should pull the whole pack (manifest + queries + wasm).
-    /// For now, we simulate installing the rust pack we just created.
-    pub async fn install_pack_from_url(&self, _lang_name: &str, _pack_url: &str) -> Result<(), LangManagerError> {
-        // Here we would download a .tar.gz containing manifest.toml, queries/, and optionally download the WASM if it's not bundled.
-        // For MVP, you'll need a way to distribute the pack.
-        unimplemented!("Pack downloading is not fully implemented yet");
+    /// Installs a language pack directly from lang-hub on GitHub.
+    pub async fn install_from_github(&self, lang_name: &str) -> Result<(), LangManagerError> {
+        let base_url = format!("https://raw.githubusercontent.com/budka-dev/lang-hub/main/list/{}", lang_name);
+        
+        // 1. Download and parse manifest
+        let manifest_url = format!("{}/manifest.toml", base_url);
+        let resp = reqwest::get(&manifest_url).await?;
+        if !resp.status().is_success() {
+            return Err(LangManagerError::LanguageNotFound(format!("Language {} not found in lang-hub", lang_name)));
+        }
+        let manifest_str = resp.text().await?;
+        let manifest: LangManifest = toml::from_str(&manifest_str)?;
+        
+        let lang_dir = self.langs_dir.join(lang_name);
+        std::fs::create_dir_all(&lang_dir)?;
+        
+        // Save manifest
+        std::fs::write(lang_dir.join("manifest.toml"), &manifest_str)?;
+        
+        // 2. Download WASM
+        // First, try to download from the compiled budka-dev/lang-hub release
+        let release_url = format!("https://github.com/budka-dev/lang-hub/releases/download/latest/tree-sitter-{}.wasm", lang_name);
+        
+        let mut resp = reqwest::get(&release_url).await?;
+        if !resp.status().is_success() {
+            // Fallback to manifest download_url if the release doesn't have it
+            let fallback_url = match &manifest.parser.download_url {
+                url if !url.is_empty() => url.clone(),
+                _ => return Err(LangManagerError::LanguageNotFound(format!("No WASM found in latest release and no fallback URL for {}", lang_name))),
+            };
+            tracing::info!("WASM not found in lang-hub release, falling back to manifest URL: {}", fallback_url);
+            resp = reqwest::get(&fallback_url).await.map_err(|e| LangManagerError::LanguageNotFound(format!("Failed to download WASM: {}", e)))?;
+            
+            if !resp.status().is_success() {
+                return Err(LangManagerError::LanguageNotFound(format!("Failed to download WASM for {} from fallback URL", lang_name)));
+            }
+        }
+        
+        let wasm_bytes = resp.bytes().await?;
+        // gofer expects <name>.wasm
+        std::fs::write(lang_dir.join(format!("{}.wasm", manifest.language.name)), &wasm_bytes)?;
+        
+        // 3. Download queries
+        let queries_dir = lang_dir.join("queries");
+        std::fs::create_dir_all(&queries_dir)?;
+        
+        let standard_queries = [
+            "symbols.scm", "references.scm", "highlights.scm", 
+            "locals.scm", "injections.scm", "folds.scm", 
+            "tags.scm", "indents.scm", "outline.scm"
+        ];
+        
+        for q in standard_queries.iter() {
+            let q_url = format!("{}/queries/{}", base_url, q);
+            if let Ok(resp) = reqwest::get(&q_url).await {
+                if resp.status().is_success() {
+                    if let Ok(q_str) = resp.text().await {
+                        let _ = std::fs::write(queries_dir.join(q), q_str);
+                    }
+                }
+            }
+        }
+        
+        tracing::info!("Successfully downloaded {} from lang-hub", lang_name);
+        
+        self.load_language_from_disk(lang_name)
+    }
+
+    pub fn get_tool(&self, tool_name: &str) -> Option<Arc<ToolManifest>> {
+        if let Some(entry) = self.loaded_tools.get(tool_name) {
+            return Some(entry.value().clone());
+        }
+
+        if self.load_tool_from_disk(tool_name).is_ok() {
+            if let Some(entry) = self.loaded_tools.get(tool_name) {
+                return Some(entry.value().clone());
+            }
+        }
+
+        tracing::info!("Tool {} not found locally, auto-downloading from lang-hub...", tool_name);
+        
+        let handle = tokio::runtime::Handle::try_current();
+        let res = match handle {
+            Ok(h) => {
+                tokio::task::block_in_place(|| {
+                    h.block_on(async {
+                        self.install_tool_from_github(tool_name).await
+                    })
+                })
+            }
+            Err(_) => {
+                if let Ok(rt) = tokio::runtime::Runtime::new() {
+                    rt.block_on(async {
+                        self.install_tool_from_github(tool_name).await
+                    })
+                } else {
+                    Err(LangManagerError::EngineError("Failed to create tokio runtime".to_string()))
+                }
+            }
+        };
+
+        if let Err(e) = res {
+            tracing::error!("Failed to auto-download tool {}: {}", tool_name, e);
+            return None;
+        }
+
+        if let Err(e) = self.load_tool_from_disk(tool_name) {
+            tracing::error!("Failed to load tool {} after download: {}", tool_name, e);
+            return None;
+        }
+
+        self.loaded_tools.get(tool_name).map(|entry| entry.value().clone())
+    }
+
+    pub fn load_tool_from_disk(&self, tool_name: &str) -> Result<(), LangManagerError> {
+        if self.loaded_tools.contains_key(tool_name) {
+            return Ok(());
+        }
+
+        let manifest_path = self.tools_dir.join(tool_name).join("manifest.toml");
+        
+        if !manifest_path.exists() {
+            return Err(LangManagerError::LanguageNotFound(format!("Tool manifest missing for {}", tool_name)));
+        }
+
+        let manifest_str = std::fs::read_to_string(manifest_path)?;
+        let manifest: ToolManifest = toml::from_str(&manifest_str)?;
+
+        self.loaded_tools.insert(tool_name.to_string(), Arc::new(manifest));
+        tracing::info!("Successfully loaded tool plugin: {}", tool_name);
+
+        Ok(())
+    }
+
+    pub async fn install_tool_from_github(&self, tool_name: &str) -> Result<(), LangManagerError> {
+        let manifest_url = format!("https://raw.githubusercontent.com/budka-dev/lang-hub/main/tools/{}/manifest.toml", tool_name);
+        
+        let resp = reqwest::get(&manifest_url).await?;
+        if !resp.status().is_success() {
+            return Err(LangManagerError::LanguageNotFound(format!("Tool {} not found in lang-hub", tool_name)));
+        }
+        let manifest_str = resp.text().await?;
+        let _manifest: ToolManifest = toml::from_str(&manifest_str)?; // Validate
+        
+        let tool_dir = self.tools_dir.join(tool_name);
+        std::fs::create_dir_all(&tool_dir)?;
+        
+        std::fs::write(tool_dir.join("manifest.toml"), &manifest_str)?;
+        
+        tracing::info!("Successfully downloaded tool manifest for {} from lang-hub", tool_name);
+        
+        self.load_tool_from_disk(tool_name)
+    }
+
+    pub async fn download_and_extract_binary(&self, tool_name: &str, manifest: &ToolManifest) -> Result<PathBuf, LangManagerError> {
+        let install_config = match &manifest.tool.install {
+            Some(i) => i,
+            None => {
+                tracing::debug!("No install config for tool {}", tool_name);
+                return Err(LangManagerError::LanguageNotFound(format!("No install config for tool {}", tool_name)));
+            }
+        };
+
+        let binary_config = &install_config.binary;
+        let tool_dir = self.tools_dir.join(tool_name).join("bin");
+        std::fs::create_dir_all(&tool_dir)?;
+
+        let exe_path = tool_dir.join(&binary_config.executable_name);
+        if exe_path.exists() {
+            return Ok(exe_path);
+        }
+
+        tracing::info!("Downloading binary for {} from {}", tool_name, binary_config.url);
+        let resp = reqwest::get(&binary_config.url).await?;
+        if !resp.status().is_success() {
+            return Err(LangManagerError::LanguageNotFound(format!("Failed to download tool {}: {}", tool_name, resp.status())));
+        }
+
+        let bytes = resp.bytes().await?;
+        
+        if binary_config.url.ends_with(".tar.gz") || binary_config.url.ends_with(".tgz") {
+            tracing::info!("Extracting archive for {}", tool_name);
+            let cursor = std::io::Cursor::new(bytes);
+            let tar = flate2::read::GzDecoder::new(cursor);
+            let mut archive = tar::Archive::new(tar);
+            
+            let temp_dir = tempfile::tempdir()?;
+            archive.unpack(temp_dir.path())?;
+            
+            let mut found_exe = None;
+            for entry in walkdir::WalkDir::new(temp_dir.path()).into_iter().flatten() {
+                if entry.file_type().is_file() && entry.file_name() == binary_config.executable_name.as_str() {
+                    found_exe = Some(entry.path().to_path_buf());
+                    break;
+                }
+            }
+
+            if let Some(src_exe) = found_exe {
+                std::fs::copy(&src_exe, &exe_path)?;
+                
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mut perms = std::fs::metadata(&exe_path)?.permissions();
+                    perms.set_mode(0o755);
+                    std::fs::set_permissions(&exe_path, perms)?;
+                }
+            } else {
+                return Err(LangManagerError::LanguageNotFound(format!("Executable {} not found in archive", binary_config.executable_name)));
+            }
+        } else {
+            std::fs::write(&exe_path, bytes)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = std::fs::metadata(&exe_path)?.permissions();
+                perms.set_mode(0o755);
+                std::fs::set_permissions(&exe_path, perms)?;
+            }
+        }
+
+        tracing::info!("Successfully installed binary for {}", tool_name);
+        Ok(exe_path)
     }
 }
 
@@ -212,7 +606,7 @@ mod tests {
     #[test]
     fn test_load_language_from_disk() {
         let langs_dir = PathBuf::from("tests/fixtures/langs");
-        let manager = LanguageManager::new(Some(langs_dir)).unwrap();
+        let manager = LanguageManager::new(Some(langs_dir), None).unwrap();
         
         let result = manager.load_language_from_disk("rust");
         

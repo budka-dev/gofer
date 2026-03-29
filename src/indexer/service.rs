@@ -4,12 +4,10 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Semaphore};
 use tokio_util::sync::CancellationToken;
 
-use super::domains::{
-    parse_backend_routes, parse_frontend_api_calls, paths_match, run_structural_fingerprinting,
-};
+use super::domains::run_structural_fingerprinting;
 use super::embedder::EmbedderPool;
 use super::parser::{smart_chunk_file, CodeParser, SupportedLanguage};
-use super::pipeline::{self, ParsedFileMetadata};
+use super::pipeline;
 use super::watcher::IndexTask;
 use crate::cache::CacheManager;
 use crate::daemon::state::SyncProgress;
@@ -155,22 +153,22 @@ impl IndexerService {
         };
 
         let mut parser = CodeParser::new();
-        let symbols = parser.parse_symbols(&content, language)?;
-        let chunks = smart_chunk_file(&content, &path_str, language).unwrap_or_else(|e| {
+        let symbols = parser.parse_symbols(&content, language.clone())?;
+        let chunks = smart_chunk_file(&content, &path_str, language.clone()).unwrap_or_else(|e| {
             tracing::debug!(
                 "smart_chunk_file failed for {}: {}, falling back to parse_chunks",
                 path_str,
                 e
             );
             parser
-                .parse_chunks(&content, &path_str, language)
+                .parse_chunks(&content, &path_str, language.clone())
                 .unwrap_or_else(|e2| {
                     tracing::warn!("parse_chunks also failed for {}: {}", path_str, e2);
                     Vec::new()
                 })
         });
-        let all_refs = parser.parse_references(&content, language)?;
-        let imports = parser.parse_imports(&content, language);
+        let all_refs = parser.parse_references(&content, language.clone())?;
+        let imports = parser.parse_imports(&content, language.clone());
 
         let modified = tokio::fs::metadata(path)
             .await?
@@ -202,25 +200,26 @@ impl IndexerService {
             .await?;
         self.sqlite.clear_dependency_usage(file_id).await?;
 
-        let ecosystem = match language {
-            SupportedLanguage::Rust => "cargo",
-            SupportedLanguage::TypeScript
-            | SupportedLanguage::JavaScript
-            | SupportedLanguage::Vue => "npm",
-            SupportedLanguage::Python => "pip",
-            SupportedLanguage::Go => "go",
+        let ecosystem = match language.name() {
+            "rust" => "cargo",
+            "typescript"
+            | "javascript"
+            | "vue" => "npm",
+            "python" => "pip",
+            "go" => "go",
+            _ => "unknown",
         };
 
         for import in &imports {
             if !import.is_relative {
-                let pkg_name = pipeline::extract_package_name(&import.path, language);
+                let pkg_name = pipeline::extract_package_name(&import.path, language.clone());
                 let items_json = if !import.items.is_empty() {
                     Some(serde_json::to_string(&import.items).unwrap_or_default())
                 } else {
                     None
                 };
-                let usage_type = match language {
-                    SupportedLanguage::Rust => "use",
+                let usage_type = match language.name() {
+                    "rust" => "use",
                     _ => "import",
                 };
 
@@ -339,74 +338,15 @@ impl IndexerService {
             return Ok(());
         }
 
-        // Phase 4: Cross-stack linking (match API routes between backend and frontend)
-        if let Some(ref p) = progress {
-            *p.stage.lock().await = "cross-stack linking".into();
-        }
-        tracing::info!("Phase 4: Cross-stack linking...");
-        let mut links_created = 0;
-
-        let backend_files: Vec<&ParsedFileMetadata> = metadata
-            .iter()
-            .filter(|f| f.domain == "rust" && f.path.contains("api"))
-            .collect();
-
-        let frontend_files: Vec<&ParsedFileMetadata> =
-            metadata.iter().filter(|f| f.domain == "frontend").collect();
-
-        for backend_file in &backend_files {
-            let ext = std::path::Path::new(&backend_file.path)
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("");
-            let routes = parse_backend_routes(&backend_file.content, ext);
-            for route in &routes {
-                for frontend_file in &frontend_files {
-                    let api_calls = parse_frontend_api_calls(&frontend_file.content);
-                    for call in &api_calls {
-                        if paths_match(&route.path, &call.path_pattern) {
-                            if let Some(handler) = &route.handler {
-                                if let Ok(Some(backend_symbol)) = self
-                                    .sqlite
-                                    .find_symbol_by_name_and_file(handler, &backend_file.path)
-                                    .await
-                                {
-                                    if let Ok(Some(frontend_symbol)) = self
-                                        .sqlite
-                                        .find_symbol_at_line(&frontend_file.path, call.line as i32)
-                                        .await
-                                    {
-                                        let _ = self
-                                            .sqlite
-                                            .insert_entity_link(
-                                                backend_symbol.id,
-                                                frontend_symbol.id,
-                                                0.8,
-                                                "api_route",
-                                                std::slice::from_ref(&route.path),
-                                            )
-                                            .await;
-                                        links_created += 1;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        tracing::info!("Cross-stack linking: {} links created", links_created);
-
         // Phase 5: AST-based Structural Fingerprinting
         if let Some(ref p) = progress {
             *p.stage.lock().await = "fingerprinting".into();
         }
         tracing::info!("Phase 5: Structural fingerprinting...");
 
-        let fp_files: Vec<(String, String, SupportedLanguage)> = metadata
+        let fp_files: Vec<(String, String, &SupportedLanguage)> = metadata
             .iter()
-            .map(|f| (f.path.clone(), (*f.content).clone(), f.language))
+            .map(|f| (f.path.clone(), (*f.content).clone(), &f.language))
             .collect();
 
         let fingerprint_links = run_structural_fingerprinting(&fp_files, &self.sqlite)

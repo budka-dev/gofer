@@ -24,9 +24,9 @@ pub async fn dispatch(name: &str, args: Value, ctx: &ToolContext) -> Result<Valu
         "git_blame" => git::tool_git_blame(args, ctx).await,
         "git_history" => git::tool_git_history(args, ctx).await,
         "context_bundle" => files::tool_context_bundle(args, ctx).await,
-        "cross_stack_search" => search::tool_cross_stack_search(args, ctx).await,
+
         "domain_stats" => project::tool_domain_stats(ctx).await,
-        "get_api_routes" => project::tool_get_api_routes(args, ctx).await,
+
         "get_summary" => project::tool_get_summary(args, ctx).await,
         "search_by_purpose" => search::tool_search_by_purpose(args, ctx).await,
         "skeleton" => files::tool_skeleton(args, ctx).await,
@@ -90,28 +90,28 @@ pub async fn dispatch(name: &str, args: Value, ctx: &ToolContext) -> Result<Valu
         "execute_function" => sandbox::tool_execute_function(args, ctx).await,
         "run_test" => sandbox::tool_run_test(args, ctx).await,
         "run_all_tests" => sandbox::tool_run_all_tests(args, ctx).await,
-        // rust-analyzer tools
-        "rust_goto_definition" => rust_analyzer::tool_rust_goto_definition(args, ctx).await,
-        "rust_find_references" => rust_analyzer::tool_rust_find_references(args, ctx).await,
-        "rust_hover" => rust_analyzer::tool_rust_hover(args, ctx).await,
-        "rust_diagnostics" => rust_analyzer::tool_rust_diagnostics(args, ctx).await,
-        "rust_completions" => rust_analyzer::tool_rust_completions(args, ctx).await,
-        "rust_inlay_hints" => rust_analyzer::tool_rust_inlay_hints(args, ctx).await,
-        "rust_code_actions" => rust_analyzer::tool_rust_code_actions(args, ctx).await,
-        // rust-analyzer extended (architecture navigation)
-        "rust_document_symbols" => {
-            rust_analyzer_extended::tool_rust_document_symbols(args, ctx).await
+        // lsp tools
+        "lsp_goto_definition" => lsp::tool_lsp_goto_definition(args, ctx).await,
+        "lsp_find_references" => lsp::tool_lsp_find_references(args, ctx).await,
+        "lsp_hover" => lsp::tool_lsp_hover(args, ctx).await,
+        "lsp_diagnostics" => lsp::tool_lsp_diagnostics(args, ctx).await,
+        "lsp_completions" => lsp::tool_lsp_completions(args, ctx).await,
+        "lsp_inlay_hints" => lsp::tool_lsp_inlay_hints(args, ctx).await,
+        "lsp_code_actions" => lsp::tool_lsp_code_actions(args, ctx).await,
+        // lsp extended (architecture navigation)
+        "lsp_document_symbols" => {
+            lsp::tool_lsp_document_symbols(args, ctx).await
         }
-        "rust_workspace_symbols" => {
-            rust_analyzer_extended::tool_rust_workspace_symbols(args, ctx).await
+        "lsp_workspace_symbols" => {
+            lsp::tool_lsp_workspace_symbols(args, ctx).await
         }
-        "rust_goto_implementation" => {
-            rust_analyzer_extended::tool_rust_goto_implementation(args, ctx).await
+        "lsp_goto_implementation" => {
+            lsp::tool_lsp_goto_implementation(args, ctx).await
         }
-        "rust_rename" => rust_analyzer_extended::tool_rust_rename(args, ctx).await,
-        "rust_expand_macro" => rust_analyzer_extended::tool_rust_expand_macro(args, ctx).await,
-        "rust_incoming_calls" => rust_analyzer_extended::tool_rust_incoming_calls(args, ctx).await,
-        "rust_outgoing_calls" => rust_analyzer_extended::tool_rust_outgoing_calls(args, ctx).await,
+        "lsp_rename" => lsp::tool_lsp_rename(args, ctx).await,
+        "lsp_expand_macro" => lsp::tool_lsp_expand_macro(args, ctx).await,
+        "lsp_incoming_calls" => lsp::tool_lsp_incoming_calls(args, ctx).await,
+        "lsp_outgoing_calls" => lsp::tool_lsp_outgoing_calls(args, ctx).await,
         // Language tools folding (meta-tools)
         "lang_tools_list" => lang_tools::tool_lang_tools_list(args, ctx).await,
         "lang_tools_call" => lang_tools::tool_lang_tools_call(args, ctx).await,
@@ -249,28 +249,8 @@ pub fn core_tools_list() -> Vec<Value> {
                 "required": ["file"]
             }
         }),
-        json!({
-            "name": "cross_stack_search",
-            "description": "Search with cross-stack correlation (find related backend/frontend entities).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "query": { "type": "string", "description": "Search query" },
-                    "include_links": { "type": "boolean", "description": "Include linked entities from other stack", "default": true }
-                },
-                "required": ["query"]
-            }
-        }),
-        json!({
-            "name": "get_api_routes",
-            "description": "List all API routes (backend endpoints and frontend API calls).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "side": { "type": "string", "description": "Filter by side: backend, frontend (optional)" }
-                }
-            }
-        }),
+
+
         json!({
             "name": "get_summary",
             "description": "Get the AI-generated or extracted summary of a file's purpose.",
@@ -1126,16 +1106,16 @@ pub fn core_tools_list() -> Vec<Value> {
                 }
             }
         }),
-        //rust-analyzer tools
+        //LSP client tools
         json!({
-            "name": "rust_goto_definition",
-            "description": "Go to definition for a Rust symbol at the specified position using rust-analyzer. Returns precise location(s) of where the symbol is defined.",
+            "name": "lsp_goto_definition",
+            "description": "Go to definition for a Rust symbol at the specified position using LSP client. Returns precise location(s) of where the symbol is defined.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "Path to Rust file (relative or absolute)"
+                        "description": "Path to file (relative or absolute)"
                     },
                     "line": {
                         "type": "integer",
@@ -1150,14 +1130,14 @@ pub fn core_tools_list() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "rust_find_references",
-            "description": "Find all references to a Rust symbol at the specified position using rust-analyzer. Shows where the symbol is used across the codebase.",
+            "name": "lsp_find_references",
+            "description": "Find all references to a Rust symbol at the specified position using LSP client. Shows where the symbol is used across the codebase.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "Path to Rust file (relative or absolute)"
+                        "description": "Path to file (relative or absolute)"
                     },
                     "line": {
                         "type": "integer",
@@ -1177,14 +1157,14 @@ pub fn core_tools_list() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "rust_hover",
-            "description": "Get hover information (type signature, documentation) for a Rust symbol at the specified position using rust-analyzer.",
+            "name": "lsp_hover",
+            "description": "Get hover information (type signature, documentation) for a Rust symbol at the specified position using LSP client.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "Path to Rust file (relative or absolute)"
+                        "description": "Path to file (relative or absolute)"
                     },
                     "line": {
                         "type": "integer",
@@ -1199,28 +1179,28 @@ pub fn core_tools_list() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "rust_diagnostics",
-            "description": "Get compiler diagnostics (errors, warnings) for a Rust file.\nReturns a token-optimized flat string array: ['line:char-end:char [severity] code message (source)'] from rust-analyzer. Real-time error checking without running cargo.",
+            "name": "lsp_diagnostics",
+            "description": "Get compiler diagnostics (errors, warnings) for a file.\nReturns a token-optimized flat string array: ['line:char-end:char [severity] code message (source)'] from LSP client. Real-time error checking without running cargo.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "Path to Rust file (relative or absolute)"
+                        "description": "Path to file (relative or absolute)"
                     }
                 },
                 "required": ["file_path"]
             }
         }),
         json!({
-            "name": "rust_completions",
-            "description": "Get code completions for Rust at position.\nReturns a token-optimized flat string array: ['label (kind) - detail'] for Rust at the specified position using rust-analyzer. Provides context-aware completions.",
+            "name": "lsp_completions",
+            "description": "Get code completions for Rust at position.\nReturns a token-optimized flat string array: ['label (kind) - detail'] for Rust at the specified position using LSP client. Provides context-aware completions.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "Path to Rust file (relative or absolute)"
+                        "description": "Path to file (relative or absolute)"
                     },
                     "line": {
                         "type": "integer",
@@ -1235,14 +1215,14 @@ pub fn core_tools_list() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "rust_inlay_hints",
-            "description": "Get inlay hints (type annotations, parameter names) for a Rust file range.\nReturns a token-optimized flat string array: ['line:char [kind] label'] using rust-analyzer. Shows implicit information inline.",
+            "name": "lsp_inlay_hints",
+            "description": "Get inlay hints (type annotations, parameter names) for a file range.\nReturns a token-optimized flat string array: ['line:char [kind] label'] using LSP client. Shows implicit information inline.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "Path to Rust file (relative or absolute)"
+                        "description": "Path to file (relative or absolute)"
                     },
                     "start_line": {
                         "type": "integer",
@@ -1257,14 +1237,14 @@ pub fn core_tools_list() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "rust_code_actions",
-            "description": "Get code actions (quick fixes, refactorings) for a Rust file range.\nReturns a token-optimized flat string array of available actions. using rust-analyzer. Suggests automated fixes and improvements.",
+            "name": "lsp_code_actions",
+            "description": "Get code actions (quick fixes, refactorings) for a file range.\nReturns a token-optimized flat string array of available actions. using LSP client. Suggests automated fixes and improvements.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "Path to Rust file (relative or absolute)"
+                        "description": "Path to file (relative or absolute)"
                     },
                     "start_line": {
                         "type": "integer",
@@ -1278,23 +1258,23 @@ pub fn core_tools_list() -> Vec<Value> {
                 "required": ["file_path", "start_line", "end_line"]
             }
         }),
-        //rust-analyzer extended tools
+        //LSP client extended tools
         json!({
-            "name": "rust_document_symbols",
-            "description": "Get document outline (structures, functions, enums, traits, impl blocks) for a Rust file. Returns hierarchical symbol tree for quick navigation without reading entire file.",
+            "name": "lsp_document_symbols",
+            "description": "Get document outline (structures, functions, enums, traits, impl blocks) for a file. Returns hierarchical symbol tree for quick navigation without reading entire file.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "Path to Rust file (relative or absolute)"
+                        "description": "Path to file (relative or absolute)"
                     }
                 },
                 "required": ["file_path"]
             }
         }),
         json!({
-            "name": "rust_workspace_symbols",
+            "name": "lsp_workspace_symbols",
             "description": "Search for symbols (structs, functions, traits, etc.) across the entire workspace by name. Like Ctrl+T in IDEs - finds definitions without knowing file location.",
             "inputSchema": {
                 "type": "object",
@@ -1308,14 +1288,14 @@ pub fn core_tools_list() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "rust_goto_implementation",
+            "name": "lsp_goto_implementation",
             "description": "Go to concrete implementation(s) of a trait method or type. Critical for Rust - shows actual code that executes, not just trait definition.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "Path to Rust file (relative or absolute)"
+                        "description": "Path to file (relative or absolute)"
                     },
                     "line": {
                         "type": "integer",
@@ -1330,14 +1310,14 @@ pub fn core_tools_list() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "rust_rename",
+            "name": "lsp_rename",
             "description": "Rename a symbol semantically across the entire workspace. Safe refactoring that updates all references, handles shadowing correctly. Returns workspace edit with all affected files.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "Path to Rust file (relative or absolute)"
+                        "description": "Path to file (relative or absolute)"
                     },
                     "line": {
                         "type": "integer",
@@ -1356,14 +1336,14 @@ pub fn core_tools_list() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "rust_expand_macro",
+            "name": "lsp_expand_macro",
             "description": "Expand Rust macro at position to see generated code. CRITICAL for understanding derive macros (Serialize, Debug), procedural macros (sqlx::query!, tokio::main), and declarative macros.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "Path to Rust file (relative or absolute)"
+                        "description": "Path to file (relative or absolute)"
                     },
                     "line": {
                         "type": "integer",
@@ -1378,14 +1358,14 @@ pub fn core_tools_list() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "rust_incoming_calls",
+            "name": "lsp_incoming_calls",
             "description": "Get incoming calls (callers) for a function/method. Shows who calls this function - useful for impact analysis when refactoring.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "Path to Rust file (relative or absolute)"
+                        "description": "Path to file (relative or absolute)"
                     },
                     "line": {
                         "type": "integer",
@@ -1400,14 +1380,14 @@ pub fn core_tools_list() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "rust_outgoing_calls",
+            "name": "lsp_outgoing_calls",
             "description": "Get outgoing calls (callees) for a function/method. Shows what this function calls - useful for understanding dependencies and control flow.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "Path to Rust file (relative or absolute)"
+                        "description": "Path to file (relative or absolute)"
                     },
                     "line": {
                         "type": "integer",

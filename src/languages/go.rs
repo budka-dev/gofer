@@ -2,7 +2,7 @@ use std::path::Path;
 
 use anyhow::Result;
 use serde_json::{json, Value};
-use tree_sitter::{Language, Parser};
+use tree_sitter::Language;
 
 use super::{LanguageService, ToolDefinition};
 use crate::storage::SqliteStorage;
@@ -36,16 +36,16 @@ impl LanguageService for GoService {
         vec![
             // --- Group 1: Comprehension ---
             ToolDefinition {
-                name: "go_project_info".into(),
-                description: "Get Go module information from go.mod: module path, Go version, dependencies, and replace directives.".into(),
+                name: "go_project_info".to_string(),
+                description: "Get Go module information from go.mod: module path, Go version, dependencies, and replace directives.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {}
                 }),
             },
             ToolDefinition {
-                name: "go_explain_struct".into(),
-                description: "Explain a Go struct: fields, methods (value + pointer receivers), and interface implementations found in the index.".into(),
+                name: "go_explain_struct".to_string(),
+                description: "Explain a Go struct: fields, methods (value + pointer receivers), and interface implementations found in the index.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -58,8 +58,8 @@ impl LanguageService for GoService {
                 }),
             },
             ToolDefinition {
-                name: "go_find_interface_impls".into(),
-                description: "Find all types that implement a given Go interface by searching the project index for matching method sets.".into(),
+                name: "go_find_interface_impls".to_string(),
+                description: "Find all types that implement a given Go interface by searching the project index for matching method sets.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -73,8 +73,8 @@ impl LanguageService for GoService {
             },
             // --- Group 2: Verification ---
             ToolDefinition {
-                name: "go_vet".into(),
-                description: "Run `go vet ./...` and return diagnostics with file locations.".into(),
+                name: "go_vet".to_string(),
+                description: "Run `go vet ./...` and return diagnostics with file locations.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -86,8 +86,8 @@ impl LanguageService for GoService {
                 }),
             },
             ToolDefinition {
-                name: "go_build".into(),
-                description: "Run `go build ./...` and return compiler errors with file locations.".into(),
+                name: "go_build".to_string(),
+                description: "Run `go build ./...` and return compiler errors with file locations.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -99,8 +99,8 @@ impl LanguageService for GoService {
                 }),
             },
             ToolDefinition {
-                name: "go_test".into(),
-                description: "Run `go test` (optionally for a specific package or test name) and return pass/fail results.".into(),
+                name: "go_test".to_string(),
+                description: "Run `go test` (optionally for a specific package or test name) and return pass/fail results.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -542,12 +542,16 @@ fn go_analyze_struct(
     Vec<(String, String, Option<String>)>,
     Vec<(String, Option<String>, bool)>,
 ) {
-    let mut parser = Parser::new();
-    let go_lang: Language = tree_sitter_go::LANGUAGE.into();
-    if parser.set_language(&go_lang).is_err() {
-        return (Vec::new(), Vec::new());
-    }
-    let tree = match parser.parse(source, None) {
+    let go_lang: Language = crate::indexer::parser::LANG_MANAGER.get_language("go").expect("Lang not loaded").language.clone();
+    
+    let tree_opt = crate::indexer::parser::with_parser(|parser| {
+        if parser.set_language(&go_lang).is_err() {
+            return None;
+        }
+        parser.parse(source, None)
+    });
+    
+    let tree = match tree_opt {
         Some(t) => t,
         None => return (Vec::new(), Vec::new()),
     };

@@ -14,7 +14,6 @@ mod models;
 mod resource_limits; // Feature 015: connection pooling & resource management
 mod scoring_index;
 mod storage; // rkyv-based hot index for file scoring
-
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -108,6 +107,12 @@ enum Commands {
         action: Option<ConfigAction>,
     },
 
+    /// Install language parser from GitHub lang-hub
+    InstallLang {
+        /// Name of the language to install (e.g. rust, vue)
+        lang: String,
+    },
+
     /// (internal) Run as daemon process
     #[command(hide = true)]
     Daemon,
@@ -155,6 +160,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Stop => handle_stop(),
         Commands::Logs { lines, follow, err } => handle_logs(lines, follow, err),
         Commands::Config { action } => handle_config(action),
+        Commands::InstallLang { lang } => handle_install_lang(lang),
     }
 }
 
@@ -765,7 +771,7 @@ fn handle_stop() -> anyhow::Result<()> {
 }
 
 fn handle_logs(lines: usize, follow: bool, err: bool) -> anyhow::Result<()> {
-    use std::io::{BufRead, BufReader, Seek, SeekFrom};
+    use std::io::{BufRead, BufReader, Seek};
 
     let home = gofer_home();
     let log_path = if err {
@@ -795,13 +801,13 @@ fn handle_logs(lines: usize, follow: bool, err: bool) -> anyhow::Result<()> {
 
     // Follow mode: seek to end and poll for new data
     let mut file = std::fs::File::open(&log_path)?;
-    file.seek(SeekFrom::End(0))?;
-    let mut reader = BufReader::new(file);
+    file.seek(std::io::SeekFrom::End(0))?;
+    let mut reader = std::io::BufReader::new(file);
     let mut buf = String::new();
 
     loop {
         buf.clear();
-        match reader.read_line(&mut buf) {
+        match std::io::BufRead::read_line(&mut reader, &mut buf) {
             Ok(0) => {
                 std::thread::sleep(std::time::Duration::from_millis(200));
             }
@@ -816,6 +822,21 @@ fn handle_logs(lines: usize, follow: bool, err: bool) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn handle_install_lang(lang: String) -> anyhow::Result<()> {
+    let rt = cli_runtime()?;
+    rt.block_on(async {
+        println!("Downloading {} from lang-hub...", lang);
+        let manager = crate::indexer::parser::lang_manager::LanguageManager::new(None, None)
+            .map_err(|e| anyhow::anyhow!("Failed to init LangManager: {}", e))?;
+        
+        manager.install_from_github(&lang).await
+            .map_err(|e| anyhow::anyhow!("Install failed: {}", e))?;
+            
+        println!("Successfully installed {}", lang);
+        anyhow::Ok(())
+    })
 }
 
 fn handle_config(action: Option<ConfigAction>) -> anyhow::Result<()> {
@@ -846,6 +867,8 @@ fn handle_config(action: Option<ConfigAction>) -> anyhow::Result<()> {
 
     Ok(())
 }
+
+
 
 const DEFAULT_CONFIG: &str = r#"# gofer configuration
 # See: gofer config --help

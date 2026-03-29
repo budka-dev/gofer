@@ -156,6 +156,7 @@ pub struct CodeChunk {
     /// Путь к символу, например "UserService::save" или "mod auth -> fn login"
     pub symbol_path: Option<String>,
     /// Стек скоупов для контекст-инъекции в oversized-чанках
+    #[allow(dead_code)]
     pub scopes: Vec<String>,
 }
 

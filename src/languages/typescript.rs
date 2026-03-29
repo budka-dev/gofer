@@ -6,7 +6,6 @@ use anyhow::Result;
 use regex::Regex;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tree_sitter::Parser;
 
 use super::{LanguageService, ToolDefinition};
 use crate::storage::SqliteStorage;
@@ -192,8 +191,8 @@ impl LanguageService for TypeScriptService {
         vec![
             // --- Group 1: Type System ---
             ToolDefinition {
-                name: "ts_inspect_type".into(),
-                description: "Inspect a TypeScript type/interface/class definition: fields, methods, extends. Finds the definition in the given file or across the project index.".into(),
+                name: "ts_inspect_type".to_string(),
+                description: "Inspect a TypeScript type/interface/class definition: fields, methods, extends. Finds the definition in the given file or across the project index.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -210,8 +209,8 @@ impl LanguageService for TypeScriptService {
                 }),
             },
             ToolDefinition {
-                name: "ts_get_signature".into(),
-                description: "Get the full signature of a TypeScript function or method: parameters, generics, return type.".into(),
+                name: "ts_get_signature".to_string(),
+                description: "Get the full signature of a TypeScript function or method: parameters, generics, return type.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -228,8 +227,8 @@ impl LanguageService for TypeScriptService {
                 }),
             },
             ToolDefinition {
-                name: "ts_get_exports".into(),
-                description: "List all exported symbols from a TypeScript/JavaScript file (functions, types, constants, classes).".into(),
+                name: "ts_get_exports".to_string(),
+                description: "List all exported symbols from a TypeScript/JavaScript file (functions, types, constants, classes).".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -243,8 +242,8 @@ impl LanguageService for TypeScriptService {
             },
             // --- Group 2: Module Resolution ---
             ToolDefinition {
-                name: "ts_resolve_import".into(),
-                description: "Resolve a TypeScript import path to the actual file on disk. Handles tsconfig.json path aliases (@/, ~/), relative paths, and index files.".into(),
+                name: "ts_resolve_import".to_string(),
+                description: "Resolve a TypeScript import path to the actual file on disk. Handles tsconfig.json path aliases (@/, ~/), relative paths, and index files.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -262,8 +261,8 @@ impl LanguageService for TypeScriptService {
             },
             // --- Group 3: Safety ---
             ToolDefinition {
-                name: "ts_check_file".into(),
-                description: "Run `tsc --noEmit` and return type-checking diagnostics. Optionally filter to a specific file.".into(),
+                name: "ts_check_file".to_string(),
+                description: "Run `tsc --noEmit` and return type-checking diagnostics. Optionally filter to a specific file.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -275,8 +274,8 @@ impl LanguageService for TypeScriptService {
                 }),
             },
             ToolDefinition {
-                name: "ts_find_references".into(),
-                description: "Find all usages and imports of a symbol across the project (from the index).".into(),
+                name: "ts_find_references".to_string(),
+                description: "Find all usages and imports of a symbol across the project (from the index).".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -406,11 +405,10 @@ fn try_resolve_file(_root: &Path, candidate: &Path) -> Option<PathBuf> {
 // ---------------------------------------------------------------------------
 
 fn parse_ts_tree(code: &str) -> Option<tree_sitter::Tree> {
-    let mut parser = Parser::new();
-    parser
-        .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
-        .ok()?;
-    parser.parse(code, None)
+    crate::indexer::parser::with_parser(|parser| {
+        parser.set_language(&crate::indexer::parser::LANG_MANAGER.get_language("typescript").expect("Lang not loaded").language).ok()?;
+        parser.parse(code, None)
+    })
 }
 
 /// Extract the full text of a type/interface/class/enum definition by name
@@ -535,7 +533,7 @@ fn find_function_in_node(
                                         .map(|p| p.kind() == "export_statement")
                                         .unwrap_or(false);
 
-                                    return Some(("arrow_function".into(), full_sig, exported));
+                                    return Some(("arrow_function".to_string(), full_sig, exported));
                                 }
                             }
                         }
@@ -760,7 +758,7 @@ impl TypeScriptService {
         } else {
             for sym in &type_syms {
                 let file = self.sqlite.get_file_by_id(sym.file_id).await?;
-                let path = file.map(|f| f.path).unwrap_or_else(|| "?".into());
+                let path = file.map(|f| f.path).unwrap_or_else(|| "?".to_string());
 
                 out.push_str(&format!("**Kind:** {}\n", sym.kind));
                 out.push_str(&format!("**Location:** `{}:{}`\n\n", path, sym.line_start));
@@ -843,7 +841,7 @@ impl TypeScriptService {
         } else {
             for sym in &fn_syms {
                 let file = self.sqlite.get_file_by_id(sym.file_id).await?;
-                let path = file.map(|f| f.path).unwrap_or_else(|| "?".into());
+                let path = file.map(|f| f.path).unwrap_or_else(|| "?".to_string());
 
                 out.push_str(&format!("**Location:** `{}:{}`\n", path, sym.line_start));
 
@@ -1083,7 +1081,7 @@ impl TypeScriptService {
                 let source = self.sqlite.get_symbol_by_id(r.source_symbol_id).await?;
                 if let Some(src) = source {
                     let file = self.sqlite.get_file_by_id(src.file_id).await?;
-                    let path = file.map(|f| f.path).unwrap_or_else(|| "?".into());
+                    let path = file.map(|f| f.path).unwrap_or_else(|| "?".to_string());
                     out.push_str(&format!(
                         "- `{}:{}` in `{}` ({})\n",
                         path, r.line, src.name, r.kind

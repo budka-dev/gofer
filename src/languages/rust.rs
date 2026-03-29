@@ -48,16 +48,16 @@ impl LanguageService for RustService {
         vec![
             // --- Group 1: Comprehension ---
             ToolDefinition {
-                name: "rust_project_info".into(),
-                description: "Get Rust workspace structure via `cargo metadata`: packages, workspace members, features, target directory.".into(),
+                name: "rust_project_info".to_string(),
+                description: "Get Rust workspace structure via `cargo metadata`: packages, workspace members, features, target directory.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {}
                 }),
             },
             ToolDefinition {
-                name: "rust_expand_macro".into(),
-                description: "Expand Rust macros using `cargo expand`. Returns expanded code or an installation hint if cargo-expand is not installed.".into(),
+                name: "rust_expand_macro".to_string(),
+                description: "Expand Rust macros using `cargo expand`. Returns expanded code or an installation hint if cargo-expand is not installed.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -69,8 +69,8 @@ impl LanguageService for RustService {
                 }),
             },
             ToolDefinition {
-                name: "rust_explain_struct".into(),
-                description: "Explain a Rust struct: fields, implemented traits, methods, and usage locations (from the project index).".into(),
+                name: "rust_explain_struct".to_string(),
+                description: "Explain a Rust struct: fields, implemented traits, methods, and usage locations (from the project index).".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -84,8 +84,8 @@ impl LanguageService for RustService {
             },
             // --- Group 2: Navigation ---
             ToolDefinition {
-                name: "rust_find_trait_impls".into(),
-                description: "Find all `impl Trait for Type` blocks for a given trait name in the indexed project.".into(),
+                name: "rust_find_trait_impls".to_string(),
+                description: "Find all `impl Trait for Type` blocks for a given trait name in the indexed project.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -98,8 +98,8 @@ impl LanguageService for RustService {
                 }),
             },
             ToolDefinition {
-                name: "rust_resolve_module_path".into(),
-                description: "Resolve a Rust module path (e.g. `crate::storage::sqlite`) to the physical file path on disk.".into(),
+                name: "rust_resolve_module_path".to_string(),
+                description: "Resolve a Rust module path (e.g. `crate::storage::sqlite`) to the physical file path on disk.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -113,8 +113,8 @@ impl LanguageService for RustService {
             },
             // --- Group 3: Verification ---
             ToolDefinition {
-                name: "rust_check_code".into(),
-                description: "Run `cargo check` and return compiler diagnostics (errors/warnings) with file locations.".into(),
+                name: "rust_check_code".to_string(),
+                description: "Run `cargo check` and return compiler diagnostics (errors/warnings) with file locations.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -126,8 +126,8 @@ impl LanguageService for RustService {
                 }),
             },
             ToolDefinition {
-                name: "rust_clippy".into(),
-                description: "Run `cargo clippy` and return lint warnings with file locations.".into(),
+                name: "rust_clippy".to_string(),
+                description: "Run `cargo clippy` and return lint warnings with file locations.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -139,8 +139,8 @@ impl LanguageService for RustService {
                 }),
             },
             ToolDefinition {
-                name: "rust_test_run".into(),
-                description: "Run `cargo test` (optionally a specific test) and return pass/fail results with failure details.".into(),
+                name: "rust_test_run".to_string(),
+                description: "Run `cargo test` (optionally a specific test) and return pass/fail results with failure details.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -153,8 +153,8 @@ impl LanguageService for RustService {
             },
             // --- Group 4: Rust Analyzer (LSP) ---
             ToolDefinition {
-                name: "rust_goto_definition".into(),
-                description: "Go to definition for Rust symbol at position.".into(),
+                name: "rust_goto_definition".to_string(),
+                description: "Go to definition for Rust symbol at position.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -166,8 +166,8 @@ impl LanguageService for RustService {
                 }),
             },
             ToolDefinition {
-                name: "rust_find_references".into(),
-                description: "Find all references to Rust symbol at position.".into(),
+                name: "rust_find_references".to_string(),
+                description: "Find all references to Rust symbol at position.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -180,8 +180,8 @@ impl LanguageService for RustService {
                 }),
             },
             ToolDefinition {
-                name: "rust_hover".into(),
-                description: "Get hover information (type, docs) for Rust symbol at position.".into(),
+                name: "rust_hover".to_string(),
+                description: "Get hover information (type, docs) for Rust symbol at position.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -193,8 +193,8 @@ impl LanguageService for RustService {
                 }),
             },
             ToolDefinition {
-                name: "rust_diagnostics".into(),
-                description: "Get compiler diagnostics (errors, warnings) for a Rust file.".into(),
+                name: "rust_diagnostics".to_string(),
+                description: "Get compiler diagnostics (errors, warnings) for a Rust file.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -204,8 +204,8 @@ impl LanguageService for RustService {
                 }),
             },
             ToolDefinition {
-                name: "rust_completions".into(),
-                description: "Get code completions for Rust at position.".into(),
+                name: "rust_completions".to_string(),
+                description: "Get code completions for Rust at position.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -217,8 +217,8 @@ impl LanguageService for RustService {
                 }),
             },
             ToolDefinition {
-                name: "rust_inlay_hints".into(),
-                description: "Get inlay hints (type annotations, parameter names) for a Rust file range.".into(),
+                name: "rust_inlay_hints".to_string(),
+                description: "Get inlay hints (type annotations, parameter names) for a Rust file range.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -230,8 +230,8 @@ impl LanguageService for RustService {
                 }),
             },
             ToolDefinition {
-                name: "rust_code_actions".into(),
-                description: "Get code actions (quick fixes, refactorings) for a Rust file range.".into(),
+                name: "rust_code_actions".to_string(),
+                description: "Get code actions (quick fixes, refactorings) for a Rust file range.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -265,38 +265,38 @@ impl LanguageService for RustService {
             // Rust Analyzer (LSP) Tools
             "rust_goto_definition" => {
                 let res =
-                    crate::daemon::handlers::rust_analyzer::tool_rust_goto_definition(args, ctx)
+                    crate::daemon::handlers::lsp::tool_lsp_goto_definition(args, ctx)
                         .await?;
                 Ok(serde_json::to_string_pretty(&res)?)
             }
             "rust_find_references" => {
                 let res =
-                    crate::daemon::handlers::rust_analyzer::tool_rust_find_references(args, ctx)
+                    crate::daemon::handlers::lsp::tool_lsp_find_references(args, ctx)
                         .await?;
                 Ok(serde_json::to_string_pretty(&res)?)
             }
             "rust_hover" => {
                 let res =
-                    crate::daemon::handlers::rust_analyzer::tool_rust_hover(args, ctx).await?;
+                    crate::daemon::handlers::lsp::tool_lsp_hover(args, ctx).await?;
                 Ok(serde_json::to_string_pretty(&res)?)
             }
             "rust_diagnostics" => {
-                let res = crate::daemon::handlers::rust_analyzer::tool_rust_diagnostics(args, ctx)
+                let res = crate::daemon::handlers::lsp::tool_lsp_diagnostics(args, ctx)
                     .await?;
                 Ok(serde_json::to_string_pretty(&res)?)
             }
             "rust_completions" => {
-                let res = crate::daemon::handlers::rust_analyzer::tool_rust_completions(args, ctx)
+                let res = crate::daemon::handlers::lsp::tool_lsp_completions(args, ctx)
                     .await?;
                 Ok(serde_json::to_string_pretty(&res)?)
             }
             "rust_inlay_hints" => {
-                let res = crate::daemon::handlers::rust_analyzer::tool_rust_inlay_hints(args, ctx)
+                let res = crate::daemon::handlers::lsp::tool_lsp_inlay_hints(args, ctx)
                     .await?;
                 Ok(serde_json::to_string_pretty(&res)?)
             }
             "rust_code_actions" => {
-                let res = crate::daemon::handlers::rust_analyzer::tool_rust_code_actions(args, ctx)
+                let res = crate::daemon::handlers::lsp::tool_lsp_code_actions(args, ctx)
                     .await?;
                 Ok(serde_json::to_string_pretty(&res)?)
             }
@@ -496,8 +496,7 @@ impl RustService {
         if !is_available {
             return Ok("**cargo-expand is not installed.**\n\n\
                  Install it with:\n```\ncargo install cargo-expand\n```\n\
-                 Then re-run this tool."
-                .into());
+                 Then re-run this tool.".to_string());
         }
 
         let mut cmd = tokio::process::Command::new("cargo");
@@ -650,7 +649,7 @@ impl RustService {
 
         for sym in &impls {
             let file = self.sqlite.get_file_by_id(sym.file_id).await?;
-            let path = file.map(|f| f.path).unwrap_or_else(|| "?".into());
+            let path = file.map(|f| f.path).unwrap_or_else(|| "?".to_string());
             let sig = sym.signature.as_deref().unwrap_or(&sym.name);
             out.push_str(&format!("- `{}` at `{}:{}`\n", sig, path, sym.line_start));
         }
@@ -766,8 +765,7 @@ impl RustService {
         let is_available = check.map(|s| s.success()).unwrap_or(false);
         if !is_available {
             return Ok("**clippy is not installed.**\n\n\
-                 Install it with:\n```\nrustup component add clippy\n```\n"
-                .into());
+                 Install it with:\n```\nrustup component add clippy\n```\n".to_string());
         }
 
         let output = tokio::process::Command::new("cargo")

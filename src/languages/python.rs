@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tree_sitter::Parser;
 
 use super::{LanguageService, ToolDefinition};
 use crate::storage::SqliteStorage;
@@ -226,7 +225,7 @@ fn read_manifest(root: &Path, env: &PythonEnvironment) -> Result<(String, Vec<De
         PackageManager::Pdm | PackageManager::Pep621 => read_pep621_manifest(root),
         PackageManager::Pipenv => read_pipfile(root),
         PackageManager::Pip => read_requirements_txt(root),
-        PackageManager::Unknown => Ok(("No manifest found".into(), Vec::new())),
+        PackageManager::Unknown => Ok(("No manifest found".to_string(), Vec::new())),
     }
 }
 
@@ -248,7 +247,7 @@ fn read_poetry_manifest(root: &Path) -> Result<(String, Vec<Dependency>)> {
                 deps.push(Dependency {
                     name: name.clone(),
                     version,
-                    group: "main".into(),
+                    group: "main".to_string(),
                 });
             }
         }
@@ -259,7 +258,7 @@ fn read_poetry_manifest(root: &Path) -> Result<(String, Vec<Dependency>)> {
                 deps.push(Dependency {
                     name: name.clone(),
                     version,
-                    group: "dev".into(),
+                    group: "dev".to_string(),
                 });
             }
         }
@@ -286,7 +285,7 @@ fn read_poetry_manifest(root: &Path) -> Result<(String, Vec<Dependency>)> {
 
     let project_name = poetry
         .and_then(|p| p.name.clone())
-        .unwrap_or_else(|| "unknown".into());
+        .unwrap_or_else(|| "unknown".to_string());
     Ok((format!("Poetry project: {}", project_name), deps))
 }
 
@@ -328,7 +327,7 @@ fn read_pep621_manifest(root: &Path) -> Result<(String, Vec<Dependency>)> {
                 deps.push(Dependency {
                     name,
                     version,
-                    group: "main".into(),
+                    group: "main".to_string(),
                 });
             }
         }
@@ -355,7 +354,7 @@ fn read_pep621_manifest(root: &Path) -> Result<(String, Vec<Dependency>)> {
         .project
         .as_ref()
         .and_then(|p| p.name.clone())
-        .unwrap_or_else(|| "unknown".into());
+        .unwrap_or_else(|| "unknown".to_string());
     Ok((format!("PEP 621 project: {}", project_name), deps))
 }
 
@@ -394,7 +393,7 @@ fn read_pipfile(root: &Path) -> Result<(String, Vec<Dependency>)> {
             deps.push(Dependency {
                 name: name.clone(),
                 version,
-                group: "main".into(),
+                group: "main".to_string(),
             });
         }
     }
@@ -413,12 +412,12 @@ fn read_pipfile(root: &Path) -> Result<(String, Vec<Dependency>)> {
             deps.push(Dependency {
                 name: name.clone(),
                 version,
-                group: "dev".into(),
+                group: "dev".to_string(),
             });
         }
     }
 
-    Ok(("Pipenv project".into(), deps))
+    Ok(("Pipenv project".to_string(), deps))
 }
 
 fn read_requirements_txt(root: &Path) -> Result<(String, Vec<Dependency>)> {
@@ -457,7 +456,7 @@ fn read_requirements_txt(root: &Path) -> Result<(String, Vec<Dependency>)> {
                         deps.push(Dependency {
                             name,
                             version,
-                            group: group.into(),
+                            group: group.to_string(),
                         });
                     }
                 }
@@ -465,7 +464,7 @@ fn read_requirements_txt(root: &Path) -> Result<(String, Vec<Dependency>)> {
         }
     }
 
-    Ok(("pip project (requirements.txt)".into(), deps))
+    Ok(("pip project (requirements.txt)".to_string(), deps))
 }
 
 // ---------------------------------------------------------------------------
@@ -502,15 +501,12 @@ struct FunctionInfo {
 }
 
 fn inspect_python_code(code: &str) -> Result<(Vec<ClassInfo>, Vec<FunctionInfo>)> {
-    let mut parser = Parser::new();
-    let language = tree_sitter_python::LANGUAGE;
-    parser
-        .set_language(&language.into())
-        .map_err(|e| anyhow::anyhow!("Failed to set Python language: {}", e))?;
-
-    let tree = parser
-        .parse(code, None)
-        .ok_or_else(|| anyhow::anyhow!("Failed to parse Python code"))?;
+    let language = crate::indexer::parser::LANG_MANAGER.get_language("python").expect("Lang not loaded").language.clone();
+    
+    let tree = crate::indexer::parser::with_parser(|parser| {
+        parser.set_language(&language).map_err(|e| anyhow::anyhow!("Failed to set Python language: {}", e))?;
+        parser.parse(code, None).ok_or_else(|| anyhow::anyhow!("Failed to parse Python code"))
+    })?;
 
     let root = tree.root_node();
     let mut classes = Vec::new();
@@ -767,7 +763,7 @@ fn resolve_python_import(
             // `from . import x` -> current package __init__.py
             let init = anchor.join("__init__.py");
             if init.exists() {
-                return Some((init, "relative package".into()));
+                return Some((init, "relative package".to_string()));
             }
             return None;
         }
@@ -790,11 +786,11 @@ fn resolve_python_import(
 
     // Check if it's a stdlib module
     if is_likely_stdlib(import_path.split('.').next().unwrap_or(import_path)) {
-        return Some((PathBuf::from("<stdlib>"), "standard library".into()));
+        return Some((PathBuf::from("<stdlib>"), "standard library".to_string()));
     }
 
     // Otherwise it's likely a third-party package
-    Some((PathBuf::from("<site-packages>"), "third-party".into()))
+    Some((PathBuf::from("<site-packages>"), "third-party".to_string()))
 }
 
 fn resolve_module_parts(module: &str, base: &Path, kind: &str) -> Option<(PathBuf, String)> {
@@ -949,10 +945,10 @@ async fn run_linter(file_path: &Path, root: &Path) -> Result<String> {
             }
         }
         if output.status.success() && stdout.trim().is_empty() {
-            return Ok("No issues found (ruff).".into());
+            return Ok("No issues found (ruff).".to_string());
         }
         if stdout.trim() == "[]" {
-            return Ok("No issues found (ruff).".into());
+            return Ok("No issues found (ruff).".to_string());
         }
         // If we got here with non-empty stdout but couldn't parse JSON,
         // just return the raw output
@@ -978,7 +974,7 @@ async fn run_linter(file_path: &Path, root: &Path) -> Result<String> {
             return Ok(format!("## flake8 output\n\n```\n{}\n```", stdout.trim()));
         }
         if output.status.success() {
-            return Ok("No issues found (flake8).".into());
+            return Ok("No issues found (flake8).".to_string());
         }
     }
 
@@ -999,16 +995,16 @@ async fn run_linter(file_path: &Path, root: &Path) -> Result<String> {
             ));
         }
         if output.status.success() {
-            return Ok("No issues found (pylint).".into());
+            return Ok("No issues found (pylint).".to_string());
         }
     }
 
-    Ok("No linter found. Install `ruff` (recommended), `flake8`, or `pylint`.".into())
+    Ok("No linter found. Install `ruff` (recommended), `flake8`, or `pylint`.".to_string())
 }
 
 fn format_ruff_output(issues: &[Value]) -> Result<String> {
     if issues.is_empty() {
-        return Ok("No issues found (ruff).".into());
+        return Ok("No issues found (ruff).".to_string());
     }
 
     let mut out = format!("## ruff: {} issue(s)\n\n", issues.len());
@@ -1051,16 +1047,16 @@ impl LanguageService for PythonService {
         vec![
             // --- Group 1: Environment & Dependencies ---
             ToolDefinition {
-                name: "python_read_manifest".into(),
-                description: "List Python project dependencies from pyproject.toml (Poetry/PDM/PEP 621), Pipfile, or requirements.txt. Returns package names, versions, and dependency groups.".into(),
+                name: "python_read_manifest".to_string(),
+                description: "List Python project dependencies from pyproject.toml (Poetry/PDM/PEP 621), Pipfile, or requirements.txt. Returns package names, versions, and dependency groups.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {}
                 }),
             },
             ToolDefinition {
-                name: "python_resolve_import".into(),
-                description: "Resolve a Python import path to its source file. Handles relative imports (dot notation), project-local modules, standard library, and third-party packages. Reports whether the import is local, stdlib, or site-packages.".into(),
+                name: "python_resolve_import".to_string(),
+                description: "Resolve a Python import path to its source file. Handles relative imports (dot notation), project-local modules, standard library, and third-party packages. Reports whether the import is local, stdlib, or site-packages.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -1078,8 +1074,8 @@ impl LanguageService for PythonService {
             },
             // --- Group 2: Code Introspection ---
             ToolDefinition {
-                name: "python_inspect_code".into(),
-                description: "Parse a Python file with tree-sitter and return structural overview: all top-level classes (with bases, methods, fields, decorators) and functions (with parameters, return types, decorators).".into(),
+                name: "python_inspect_code".to_string(),
+                description: "Parse a Python file with tree-sitter and return structural overview: all top-level classes (with bases, methods, fields, decorators) and functions (with parameters, return types, decorators).".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -1093,8 +1089,8 @@ impl LanguageService for PythonService {
             },
             // --- Group 3: Linting ---
             ToolDefinition {
-                name: "python_run_linter".into(),
-                description: "Run a Python linter (ruff preferred, fallback to flake8/pylint) on a file. Returns structured diagnostics: line, code, message.".into(),
+                name: "python_run_linter".to_string(),
+                description: "Run a Python linter (ruff preferred, fallback to flake8/pylint) on a file. Returns structured diagnostics: line, code, message.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -1162,7 +1158,7 @@ impl PythonService {
                 .venv_path
                 .as_ref()
                 .map(|p| p.strip_prefix(root).unwrap_or(p).display().to_string())
-                .unwrap_or_else(|| "detected".into());
+                .unwrap_or_else(|| "detected".to_string());
             out.push_str(&format!("- **Virtual env:** `{}`\n", venv_display));
         } else {
             out.push_str("- **Virtual env:** not detected\n");

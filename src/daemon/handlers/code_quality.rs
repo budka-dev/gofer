@@ -41,39 +41,70 @@ pub async fn tool_format_file(args: Value, ctx: &ToolContext) -> Result<Value> {
 
     let ext = abs_path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
-    // Detect formatter based on extension
-    let formatter_name = formatter.unwrap_or(match ext {
-        "rs" => "rustfmt",
-        "ts" | "tsx" | "js" | "jsx" | "json" => "prettier",
-        "py" => "black",
-        "go" => "gofmt",
-        _ => "unknown",
-    });
+    let formatter_name = if let Some(f) = formatter {
+        f.to_string()
+    } else {
+        match ctx.lang_manager.get_language_by_ext(ext) {
+            Some(lang_id) => {
+                match ctx.lang_manager.loaded_langs.get(&lang_id) {
+                    Some(loaded) => {
+                        let f_tool = loaded.value().manifest.formatter.as_ref().map(|f| f.tool.clone());
+                        f_tool.unwrap_or(lang_id)
+                    }
+                    None => return Err(GoferError::InvalidParams(format!("Language not loaded: {}", lang_id)).into()),
+                }
+            }
+            None => return Err(GoferError::InvalidParams(format!("No language matched for extension: {}", ext)).into()),
+        }
+    };
 
-    if formatter_name == "unknown" {
-        return Err(GoferError::InvalidParams(format!(
-            "No formatter available for extension: {}",
-            ext
-        ))
-        .into());
+    let tool_manifest = match ctx.lang_manager.get_tool(&formatter_name) {
+        Some(tm) => tm,
+        None => return Err(GoferError::InvalidParams(format!("Tool {} not found in lang-hub", formatter_name)).into()),
+    };
+
+    let fmt_config = match &tool_manifest.formatter {
+        Some(f) => f.clone(),
+        None => return Err(GoferError::InvalidParams(format!("Tool {} has no formatter config", formatter_name)).into()),
+    };
+
+    let mut cmd_str = fmt_config.command;
+    let mut cmd_args = fmt_config.args;
+
+    if let Some(install) = &tool_manifest.tool.install {
+        let exe_name = &install.binary.executable_name;
+        let local_exe = ctx.lang_manager.tools_dir.join(&formatter_name).join("bin").join(exe_name);
+        if !local_exe.exists() {
+            tracing::info!("Tool executable {} not found locally. Attempting to download...", exe_name);
+            if let Ok(path) = ctx.lang_manager.download_and_extract_binary(&formatter_name, &tool_manifest).await {
+                cmd_str = path.to_string_lossy().to_string();
+            }
+        } else {
+            cmd_str = local_exe.to_string_lossy().to_string();
+        }
     }
+
+    cmd_args.push(abs_path.to_string_lossy().to_string());
 
     // Read original content to detect changes
     let original_content = tokio::fs::read_to_string(&abs_path).await?;
     let original_lines = original_content.lines().count();
 
     // Run formatter
-    let result = match formatter_name {
-        "rustfmt" => format_with_rustfmt(&abs_path).await?,
-        "prettier" => format_with_prettier(&abs_path).await?,
-        "black" => format_with_black(&abs_path).await?,
-        "gofmt" => format_with_gofmt(&abs_path).await?,
-        _ => {
-            return Err(
-                GoferError::InvalidParams(format!("Unknown formatter: {}", formatter_name)).into(),
-            )
-        }
+    let output = Command::new(&cmd_str)
+        .args(&cmd_args)
+        .output()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to run formatter {}: {}", formatter_name, e))?;
+
+    let result = FormatResult {
+        success: output.status.success(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
     };
+
+    if !result.success {
+        tracing::warn!("Formatter {} failed: {}", formatter_name, result.stderr);
+    }
 
     // Read formatted content
     let formatted_content = tokio::fs::read_to_string(&abs_path).await?;
@@ -112,32 +143,53 @@ pub async fn tool_lint_file(args: Value, ctx: &ToolContext) -> Result<Value> {
 
     let ext = abs_path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
-    // Detect linter based on extension
-    let linter_name = match ext {
-        "rs" => "clippy",
-        "ts" | "tsx" | "js" | "jsx" => "eslint",
-        "py" => "ruff",
-        "go" => "golangci-lint",
-        _ => {
-            return Err(GoferError::InvalidParams(format!(
-                "No linter available for extension: {}",
-                ext
-            ))
-            .into())
+    // Detect linter
+    let linter_name = match ctx.lang_manager.get_language_by_ext(ext) {
+        Some(lang_id) => {
+            match ctx.lang_manager.loaded_langs.get(&lang_id) {
+                Some(loaded) => {
+                    let l_tool = loaded.value().manifest.linter.as_ref().map(|l| l.tool.clone());
+                    l_tool.unwrap_or(lang_id)
+                }
+                None => return Err(GoferError::InvalidParams(format!("Language not loaded: {}", lang_id)).into()),
+            }
         }
+        None => return Err(GoferError::InvalidParams(format!("No language matched for extension: {}", ext)).into()),
     };
 
-    // Run linter
-    let result = match linter_name {
-        "clippy" => lint_with_clippy(&abs_path, &ctx.root_path).await?,
-        "eslint" => lint_with_eslint(&abs_path).await?,
-        "ruff" => lint_with_ruff(&abs_path).await?,
-        "golangci-lint" => lint_with_golangci(&abs_path).await?,
-        _ => {
-            return Err(
-                GoferError::InvalidParams(format!("Unknown linter: {}", linter_name)).into(),
-            )
+    let tool_manifest = match ctx.lang_manager.get_tool(&linter_name) {
+        Some(tm) => tm,
+        None => return Err(GoferError::InvalidParams(format!("Tool {} not found in lang-hub", linter_name)).into()),
+    };
+
+    let lint_config = match &tool_manifest.linter {
+        Some(l) => l.clone(),
+        None => return Err(GoferError::InvalidParams(format!("Tool {} has no linter config", linter_name)).into()),
+    };
+
+    let mut cmd_str = lint_config.command;
+    let cmd_args = lint_config.args;
+
+    if let Some(install) = &tool_manifest.tool.install {
+        let exe_name = &install.binary.executable_name;
+        let local_exe = ctx.lang_manager.tools_dir.join(&linter_name).join("bin").join(exe_name);
+        if !local_exe.exists() {
+            tracing::info!("Tool executable {} not found locally. Attempting to download...", exe_name);
+            if let Ok(path) = ctx.lang_manager.download_and_extract_binary(&linter_name, &tool_manifest).await {
+                cmd_str = path.to_string_lossy().to_string();
+            }
+        } else {
+            cmd_str = local_exe.to_string_lossy().to_string();
         }
+    }
+
+    // Run linter using appropriate parser
+    let result = match linter_name.as_str() {
+        "clippy" => lint_with_clippy(&cmd_str, &cmd_args, &abs_path, &ctx.root_path).await?,
+        "eslint" => lint_with_eslint(&cmd_str, &cmd_args, &abs_path).await?,
+        "ruff" => lint_with_ruff(&cmd_str, &cmd_args, &abs_path).await?,
+        "golangci-lint" => lint_with_golangci(&cmd_str, &cmd_args, &abs_path).await?,
+        _ => return Err(GoferError::InvalidParams(format!("Unknown linter parser for: {}", linter_name)).into()),
     };
 
     let warnings: Vec<String> = result
@@ -215,59 +267,7 @@ struct FormatResult {
     stderr: String,
 }
 
-async fn format_with_rustfmt(path: &Path) -> Result<FormatResult> {
-    let output = Command::new("rustfmt")
-        .arg(path)
-        .output()
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to run rustfmt: {}. Is it installed?", e))?;
 
-    Ok(FormatResult {
-        success: output.status.success(),
-        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-    })
-}
-
-async fn format_with_prettier(path: &Path) -> Result<FormatResult> {
-    let output = Command::new("prettier")
-        .arg("--write")
-        .arg(path)
-        .output()
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to run prettier: {}. Is it installed?", e))?;
-
-    Ok(FormatResult {
-        success: output.status.success(),
-        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-    })
-}
-
-async fn format_with_black(path: &Path) -> Result<FormatResult> {
-    let output = Command::new("black")
-        .arg(path)
-        .output()
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to run black: {}. Is it installed?", e))?;
-
-    Ok(FormatResult {
-        success: output.status.success(),
-        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-    })
-}
-
-async fn format_with_gofmt(path: &Path) -> Result<FormatResult> {
-    let output = Command::new("gofmt")
-        .arg("-w")
-        .arg(path)
-        .output()
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to run gofmt: {}. Is it installed?", e))?;
-
-    Ok(FormatResult {
-        success: output.status.success(),
-        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-    })
-}
 
 // Linter implementations
 
@@ -277,14 +277,15 @@ struct LintResult {
     errors: Vec<String>,
 }
 
-async fn lint_with_clippy(path: &Path, project_root: &Path) -> Result<LintResult> {
-    // Run clippy on the entire project (clippy doesn't support single-file mode well)
-    let output = Command::new("cargo")
-        .arg("clippy")
-        .arg("--message-format=json")
-        .arg("--")
-        .arg("-W")
-        .arg("clippy::all")
+async fn lint_with_clippy(cmd: &str, args: &[String], path: &Path, project_root: &Path) -> Result<LintResult> {
+    let mut command = Command::new(cmd);
+    command.args(args);
+    command.arg("--message-format=json");
+    command.arg("--");
+    command.arg("-W");
+    command.arg("clippy::all");
+    
+    let output = command
         .current_dir(project_root)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -345,10 +346,13 @@ async fn lint_with_clippy(path: &Path, project_root: &Path) -> Result<LintResult
     Ok(LintResult { warnings, errors })
 }
 
-async fn lint_with_eslint(path: &Path) -> Result<LintResult> {
-    let output = Command::new("eslint")
-        .arg("--format=json")
-        .arg(path)
+async fn lint_with_eslint(cmd: &str, args: &[String], path: &Path) -> Result<LintResult> {
+    let mut command = Command::new(cmd);
+    command.args(args);
+    command.arg("--format=json");
+    command.arg(path);
+
+    let output = command
         .output()
         .await
         .map_err(|e| anyhow::anyhow!("Failed to run eslint: {}. Is it installed?", e))?;
@@ -393,11 +397,13 @@ async fn lint_with_eslint(path: &Path) -> Result<LintResult> {
     Ok(LintResult { warnings, errors })
 }
 
-async fn lint_with_ruff(path: &Path) -> Result<LintResult> {
-    let output = Command::new("ruff")
-        .arg("check")
-        .arg("--output-format=json")
-        .arg(path)
+async fn lint_with_ruff(cmd: &str, args: &[String], path: &Path) -> Result<LintResult> {
+    let mut command = Command::new(cmd);
+    command.args(args);
+    command.arg("--output-format=json");
+    command.arg(path);
+
+    let output = command
         .output()
         .await
         .map_err(|e| anyhow::anyhow!("Failed to run ruff: {}. Is it installed?", e))?;
@@ -441,7 +447,7 @@ async fn lint_with_ruff(path: &Path) -> Result<LintResult> {
     Ok(LintResult { warnings, errors })
 }
 
-async fn lint_with_golangci(_path: &Path) -> Result<LintResult> {
+async fn lint_with_golangci(_cmd: &str, _args: &[String], _path: &Path) -> Result<LintResult> {
     // golangci-lint is project-level, not file-level
     Ok(LintResult {
         warnings: Vec::new(),

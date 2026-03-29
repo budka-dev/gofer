@@ -127,6 +127,7 @@ pub async fn tool_domain_stats(ctx: &ToolContext) -> Result<Value> {
     }))
 }
 
+#[allow(dead_code)]
 pub async fn tool_get_api_routes(args: Value, ctx: &ToolContext) -> Result<Value> {
     let side = args.get("side").and_then(|v| v.as_str());
 

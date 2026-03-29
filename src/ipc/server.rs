@@ -48,14 +48,14 @@ pub async fn run_daemon(state: Arc<DaemonState>) -> Result<()> {
 
                 tokio::spawn(async move {
                     let conn_start = std::time::Instant::now();
-                    tracing::debug!("New connection accepted (active connections: {})", 1024 - state.connection_semaphore.available_permits());
+                    tracing::info!("New connection accepted (active connections: {})", 1024 - state.connection_semaphore.available_permits());
 
                     if let Err(e) = handle_connection(stream, state.clone()).await {
                         tracing::error!("Connection error: {}", e);
                     }
 
                     let duration = conn_start.elapsed();
-                    tracing::debug!(
+                    tracing::info!(
                         "Connection closed after {:?} (active connections: {})",
                         duration,
                         1024 - state.connection_semaphore.available_permits() - 1
@@ -116,8 +116,8 @@ async fn handle_connection(stream: tokio::net::UnixStream, state: Arc<DaemonStat
 
     // Per-connection rate limiter: max 1000 requests per second
     const RATE_LIMIT: u32 = 1000;
-    // Idle timeout: close connection after 5 minutes of inactivity
-    const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+    // Idle timeout: close connection after 6 hours of inactivity
+    const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(21600);
 
     let mut window_start = std::time::Instant::now();
     let mut window_count: u32 = 0;
@@ -272,6 +272,9 @@ async fn handle_connection(stream: tokio::net::UnixStream, state: Arc<DaemonStat
                             None
                         };
 
+                        if req.method != "ping" {
+                            tracing::info!("Incoming request: {}", req.method);
+                        }
                         let resp = handle_request(req, &state).await;
 
                         // Stop progress reporter
@@ -321,6 +324,24 @@ async fn handle_request(req: DaemonRequest, state: &Arc<DaemonState>) -> DaemonR
         "daemon/metrics" => handle_metrics(id, state).await,
         "daemon/shutdown" => handle_shutdown(id, state).await,
         "reindex" => handle_reindex(id, &req.params, state).await,
+        "sandbox/pending_requests" => {
+            let mut list = Vec::new();
+            for entry in state.pending_confirmations.iter() {
+                list.push(json!({
+                    "id": entry.key(),
+                    "command": entry.value().0
+                }));
+            }
+            DaemonResponse::success(id, json!(list))
+        }
+        "sandbox/confirm_response" => {
+            let req_id = req.params.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+            let approved = req.params.get("approved").and_then(|v| v.as_bool()).unwrap_or(false);
+            if let Some((_, (_, tx))) = state.pending_confirmations.remove(req_id) {
+                let _ = tx.send(approved);
+            }
+            DaemonResponse::success(id, Value::Null)
+        }
 
         // === MCP protocol methods ===
         "initialize" => DaemonResponse::success(
@@ -649,8 +670,10 @@ async fn handle_tools_call(
         cache: Arc::clone(&project.cache),
         embedding_circuit: Arc::clone(&state.embedding_circuit),
         vector_circuit: Arc::clone(&state.vector_circuit),
-        rust_analyzer: Arc::clone(&project.rust_analyzer),
+        lang_manager: Arc::clone(&state.lang_manager),
+        lsp_clients: Arc::clone(&project.lsp_clients),
         language_services: Arc::clone(&project.language_services),
+        state: Arc::clone(state),
     };
 
     // Try language services first
@@ -662,13 +685,16 @@ async fn handle_tools_call(
                     id,
                     json!({ "content": [{"type": "text", "text": text}] }),
                 ),
-                Err(e) => DaemonResponse::success(
-                    id,
-                    json!({
-                        "content": [{"type": "text", "text": format!("Error: {}", e)}],
-                        "isError": true
-                    }),
-                ),
+                Err(e) => {
+                    tracing::error!("Tool Error [{}]: {}", name, e);
+                    DaemonResponse::success(
+                        id,
+                        json!({
+                            "content": [{"type": "text", "text": format!("Error: {}", e)}],
+                            "isError": true
+                        }),
+                    )
+                }
             };
         }
     }
@@ -704,13 +730,16 @@ async fn handle_tools_call(
             let text = serde_json::to_string_pretty(&value).unwrap_or_default();
             DaemonResponse::success(id, json!({ "content": [{"type": "text", "text": text}] }))
         }
-        Err(e) => DaemonResponse::success(
-            id,
-            json!({
-                "content": [{"type": "text", "text": format!("Error: {}", e)}],
-                "isError": true
-            }),
-        ),
+        Err(e) => {
+            tracing::error!("Tool Error [{}]: {}", name, e);
+            DaemonResponse::success(
+                id,
+                json!({
+                    "content": [{"type": "text", "text": format!("Error: {}", e)}],
+                    "isError": true
+                }),
+            )
+        }
     }
 }
 
@@ -780,8 +809,10 @@ async fn handle_resources_read(
         cache: Arc::clone(&project.cache),
         embedding_circuit: Arc::clone(&state.embedding_circuit), // Feature 016
         vector_circuit: Arc::clone(&state.vector_circuit),       // Feature 016
-        rust_analyzer: Arc::clone(&project.rust_analyzer),
+        lang_manager: Arc::clone(&state.lang_manager),
+        lsp_clients: Arc::clone(&project.lsp_clients),
         language_services: Arc::clone(&project.language_services),
+        state: Arc::clone(state),
     };
 
     let result = match uri {
@@ -934,8 +965,10 @@ async fn handle_prompts_get(
         cache: Arc::clone(&project.cache),
         embedding_circuit: Arc::clone(&state.embedding_circuit), // Feature 016
         vector_circuit: Arc::clone(&state.vector_circuit),       // Feature 016
-        rust_analyzer: Arc::clone(&project.rust_analyzer),
+        lang_manager: Arc::clone(&state.lang_manager),
+        lsp_clients: Arc::clone(&project.lsp_clients),
         language_services: Arc::clone(&project.language_services),
+        state: Arc::clone(state),
     };
 
     let result = match name {

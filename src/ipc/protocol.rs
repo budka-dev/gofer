@@ -51,6 +51,7 @@ impl DaemonResponse {
     }
 
     pub fn error(id: Value, code: i32, message: String) -> Self {
+        tracing::error!("RPC Error [{}]: {}", code, message);
         Self {
             jsonrpc: "2.0",
             id,

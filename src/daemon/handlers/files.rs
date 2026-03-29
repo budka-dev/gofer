@@ -1,6 +1,5 @@
 use super::common::{make_relative, resolve_path, ToolContext};
 use crate::error::GoferError;
-use crate::indexer::parser::core::SupportedLanguage;
 use crate::storage::SqliteStorage;
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -208,11 +207,11 @@ pub async fn tool_read_function_context(args: Value, ctx: &ToolContext) -> Resul
     let content = tokio::fs::read_to_string(&file_path).await?;
     let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
     let lang = match ext {
-        "rs" => SupportedLanguage::Rust,
-        "ts" | "tsx" => SupportedLanguage::TypeScript,
-        "js" | "jsx" => SupportedLanguage::JavaScript,
-        "py" => SupportedLanguage::Python,
-        "go" => SupportedLanguage::Go,
+        "rs" => "rust",
+        "ts" | "tsx" => "typescript",
+        "js" | "jsx" => "javascript",
+        "py" => "python",
+        "go" => "go",
         _ => {
             return Err(GoferError::InvalidParams(format!("Unsupported language: {}", ext)).into())
         }
@@ -220,31 +219,32 @@ pub async fn tool_read_function_context(args: Value, ctx: &ToolContext) -> Resul
 
     // Extract data from AST synchronously in a block to ensure !Send types (Node, etc) are dropped
     let (function_code, start_line, end_line, type_names, callee_names) = {
-        let mut parser = tree_sitter::Parser::new();
-        let language = lang.tree_sitter_language();
+        let language = crate::indexer::parser::LANG_MANAGER.get_language(lang).expect("Lang not loaded").language.clone();
 
-        parser
-            .set_language(&language)
-            .map_err(|e| anyhow::anyhow!("Tree-sitter error: {}", e))?;
-        let tree = parser
-            .parse(&content, None)
-            .ok_or_else(|| anyhow::anyhow!("Failed to parse file"))?;
+        let tree_opt = crate::indexer::parser::with_parser(|parser| {
+            if parser.set_language(&language).is_err() {
+                return None;
+            }
+            parser.parse(&content, None)
+        });
+
+        let tree = tree_opt.ok_or_else(|| anyhow::anyhow!("Failed to parse file"))?;
 
         let root = tree.root_node();
         let query_str = match lang {
-            SupportedLanguage::Rust => format!(
+            "rust" => format!(
                 r#"(function_item name: (identifier) @name (#eq? @name "{}")) @func"#,
                 function
             ),
-            SupportedLanguage::TypeScript | SupportedLanguage::JavaScript => format!(
+            "typescript" | "javascript" => format!(
                 r#"(function_declaration name: (identifier) @name (#eq? @name "{}")) @func"#,
                 function
             ),
-            SupportedLanguage::Python => format!(
+            "python" => format!(
                 r#"(function_definition name: (identifier) @name (#eq? @name "{}")) @func"#,
                 function
             ),
-            SupportedLanguage::Go => format!(
+            "go" => format!(
                 r#"(function_declaration name: (identifier) @name (#eq? @name "{}")) @func"#,
                 function
             ),
@@ -288,13 +288,13 @@ pub async fn tool_read_function_context(args: Value, ctx: &ToolContext) -> Resul
         let end_line = function_node.end_position().row + 1;
 
         let type_names = if include_types {
-            collect_type_names(&function_node, &content, &lang)?
+            collect_type_names(&function_node, &content, lang)?
         } else {
             HashSet::new()
         };
 
         let callee_names = if include_callees {
-            collect_callee_names(&function_node, &content, &lang)?
+            collect_callee_names(&function_node, &content, lang)?
         } else {
             HashSet::new()
         };
@@ -321,7 +321,7 @@ pub async fn tool_read_function_context(args: Value, ctx: &ToolContext) -> Resul
 
     let mut callees = Vec::new();
     if include_callees {
-        callees = resolve_callees(callee_names, &content, &lang).await?;
+        callees = resolve_callees(callee_names, &content, lang).await?;
     }
 
     Ok(json!({
@@ -635,18 +635,18 @@ fn count_skeleton_items(_content: &str, _language: &str) -> serde_json::Value {
 fn collect_type_names(
     function_node: &tree_sitter::Node<'_>,
     content: &str,
-    lang: &SupportedLanguage,
+    lang: &str,
 ) -> Result<HashSet<String>> {
     use tree_sitter::Query;
     let type_query_str = match lang {
-        SupportedLanguage::Rust => "(type_identifier) @type",
-        SupportedLanguage::TypeScript | SupportedLanguage::JavaScript => "(type_identifier) @type",
-        SupportedLanguage::Python => "(type) @type",
-        SupportedLanguage::Go => "(type_identifier) @type",
+        "rust" => "(type_identifier) @type",
+        "typescript" | "javascript" => "(type_identifier) @type",
+        "python" => "(type) @type",
+        "go" => "(type_identifier) @type",
         _ => return Ok(HashSet::new()),
     };
 
-    let type_query = Query::new(&lang.tree_sitter_language(), type_query_str)
+    let type_query = Query::new(&crate::indexer::parser::LANG_MANAGER.get_language(lang).expect("Lang not loaded").language, type_query_str)
         .map_err(|e| anyhow::anyhow!("Type query error: {}", e))?;
 
     let mut cursor = tree_sitter::QueryCursor::new();
@@ -717,20 +717,20 @@ async fn resolve_types(
 fn collect_callee_names(
     function_node: &tree_sitter::Node<'_>,
     content: &str,
-    lang: &SupportedLanguage,
+    lang: &str,
 ) -> Result<HashSet<String>> {
     use tree_sitter::Query;
     let call_query_str = match lang {
-        SupportedLanguage::Rust => "(call_expression function: (identifier) @callee)",
-        SupportedLanguage::TypeScript | SupportedLanguage::JavaScript => {
+        "rust" => "(call_expression function: (identifier) @callee)",
+        "typescript" | "javascript" => {
             "(call_expression function: (identifier) @callee)"
         }
-        SupportedLanguage::Python => "(call function: (identifier) @callee)",
-        SupportedLanguage::Go => "(call_expression function: (identifier) @callee)",
+        "python" => "(call function: (identifier) @callee)",
+        "go" => "(call_expression function: (identifier) @callee)",
         _ => return Ok(HashSet::new()),
     };
 
-    let call_query = Query::new(&lang.tree_sitter_language(), call_query_str)
+    let call_query = Query::new(&crate::indexer::parser::LANG_MANAGER.get_language(lang).expect("Lang not loaded").language, call_query_str)
         .map_err(|e| anyhow::anyhow!("Call query error: {}", e))?;
 
     let mut cursor = tree_sitter::QueryCursor::new();
@@ -750,7 +750,7 @@ fn collect_callee_names(
 async fn resolve_callees(
     callee_names: HashSet<String>,
     content: &str,
-    lang: &SupportedLanguage,
+    lang: &str,
 ) -> Result<Vec<String>> {
     if callee_names.is_empty() {
         return Ok(Vec::new());
@@ -769,9 +769,9 @@ async fn resolve_callees(
     Ok(callees)
 }
 
-fn is_primitive_type(type_name: &str, lang: &SupportedLanguage) -> bool {
+fn is_primitive_type(type_name: &str, lang: &str) -> bool {
     match lang {
-        SupportedLanguage::Rust => {
+        "rust" => {
             matches!(
                 type_name,
                 "i8" | "i16"
@@ -799,7 +799,7 @@ fn is_primitive_type(type_name: &str, lang: &SupportedLanguage) -> bool {
                     | "Rc"
             )
         }
-        SupportedLanguage::TypeScript | SupportedLanguage::JavaScript => {
+        "typescript" | "javascript" => {
             matches!(
                 type_name,
                 "string"
@@ -818,7 +818,7 @@ fn is_primitive_type(type_name: &str, lang: &SupportedLanguage) -> bool {
                     | "Set"
             )
         }
-        SupportedLanguage::Python => {
+        "python" => {
             matches!(
                 type_name,
                 "int"
@@ -835,7 +835,7 @@ fn is_primitive_type(type_name: &str, lang: &SupportedLanguage) -> bool {
                     | "Union"
             )
         }
-        SupportedLanguage::Go => {
+        "go" => {
             matches!(
                 type_name,
                 "int"
@@ -872,40 +872,42 @@ struct FunctionInfo {
 fn find_function_in_file(
     function_name: &str,
     content: &str,
-    lang: &SupportedLanguage,
+    lang: &str,
 ) -> Result<Option<FunctionInfo>> {
-    use tree_sitter::{Parser, Query, QueryCursor};
+    use tree_sitter::{Query, QueryCursor};
 
     let query_str = match lang {
-        SupportedLanguage::Rust => format!(
+        "rust" => format!(
             r#"(function_item name: (identifier) @name (#eq? @name "{}")) @func"#,
             function_name
         ),
-        SupportedLanguage::TypeScript | SupportedLanguage::JavaScript => format!(
+        "typescript" | "javascript" => format!(
             r#"(function_declaration name: (identifier) @name (#eq? @name "{}")) @func"#,
             function_name
         ),
-        SupportedLanguage::Python => format!(
+        "python" => format!(
             r#"(function_definition name: (identifier) @name (#eq? @name "{}")) @func"#,
             function_name
         ),
-        SupportedLanguage::Go => format!(
+        "go" => format!(
             r#"(function_declaration name: (identifier) @name (#eq? @name "{}")) @func"#,
             function_name
         ),
         _ => return Ok(None),
     };
 
-    let mut parser = Parser::new();
-    parser
-        .set_language(&lang.tree_sitter_language())
-        .map_err(|e| anyhow::anyhow!("Failed to set language: {}", e))?;
+    let language = crate::indexer::parser::LANG_MANAGER.get_language(lang).expect("Lang not loaded").language.clone();
+    
+    let tree_opt = crate::indexer::parser::with_parser(|parser| {
+        if parser.set_language(&language).is_err() {
+            return None;
+        }
+        parser.parse(content, None)
+    });
 
-    let tree = parser
-        .parse(content, None)
-        .ok_or_else(|| anyhow::anyhow!("Failed to parse file"))?;
+    let tree = tree_opt.ok_or_else(|| anyhow::anyhow!("Failed to parse file"))?;
 
-    let query = Query::new(&lang.tree_sitter_language(), &query_str)
+    let query = Query::new(&language, &query_str)
         .map_err(|e| anyhow::anyhow!("Query error: {}", e))?;
 
     let mut cursor = QueryCursor::new();

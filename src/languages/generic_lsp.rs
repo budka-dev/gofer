@@ -25,10 +25,18 @@ use tracing::{debug, error, info, warn};
 
 type ResponseSender = oneshot::Sender<Result<Value>>;
 
-/// rust-analyzer LSP client wrapper.
-pub struct RustAnalyzer {
+/// Generic LSP client wrapper.
+pub struct GenericLspClient {
+    /// Target LSP executable command
+    command: String,
+    /// Arguments for the LSP executable
+    args: Vec<String>,
+    /// Language ID for textDocument objects (e.g. "rust", "python")
+    lang_id: String,
     /// Project root path
     root_path: PathBuf,
+    /// LSP initialisation options
+    init_options: Option<Value>,
     /// rust-analyzer process handle
     process: Arc<Mutex<Option<Child>>>,
     /// Stdin handle for sending requests
@@ -43,11 +51,15 @@ pub struct RustAnalyzer {
     diagnostics: Arc<RwLock<HashMap<String, Vec<Diagnostic>>>>,
 }
 
-impl RustAnalyzer {
-    /// Create a new rust-analyzer client for the given project.
-    pub fn new(root_path: PathBuf) -> Self {
+impl GenericLspClient {
+    /// Create a new generic LSP client for the given project.
+    pub fn new(root_path: PathBuf, command: String, args: Vec<String>, lang_id: String, init_options: Option<Value>) -> Self {
         Self {
+            command,
+            args,
+            lang_id,
             root_path,
+            init_options,
             process: Arc::new(Mutex::new(None)),
             stdin: Arc::new(Mutex::new(None)),
             next_id: Arc::new(RwLock::new(1)),
@@ -57,25 +69,26 @@ impl RustAnalyzer {
         }
     }
 
-    /// Start rust-analyzer process and initialize.
+    /// Start LSP server process and initialize.
     pub async fn start(&self) -> Result<()> {
         let mut proc_guard = self.process.lock().await;
 
         if proc_guard.is_some() {
-            warn!("rust-analyzer already running");
+            warn!("LSP server {} already running", self.command);
             return Ok(());
         }
 
-        info!("Starting rust-analyzer for {:?}", self.root_path);
+        info!("Starting LSP server {} for {:?}", self.command, self.root_path);
 
-        let mut child = Command::new("rust-analyzer")
+        let mut child = Command::new(&self.command)
+            .args(&self.args)
             .current_dir(&self.root_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .kill_on_drop(true)
             .spawn()
-            .context("Failed to spawn rust-analyzer")?;
+            .context(format!("Failed to spawn LSP server {}", self.command))?;
 
         let stdin = child.stdin.take().context("Failed to get stdin")?;
         let stdout = child.stdout.take().context("Failed to get stdout")?;
@@ -126,6 +139,7 @@ impl RustAnalyzer {
                 }),
                 ..Default::default()
             },
+            initialization_options: self.init_options.clone(),
             ..Default::default()
         };
 
@@ -137,7 +151,7 @@ impl RustAnalyzer {
             .await?;
 
         *self.initialized.write().await = true;
-        info!("rust-analyzer initialized successfully");
+        info!("LSP server initialized successfully");
 
         Ok(())
     }
@@ -160,7 +174,7 @@ impl RustAnalyzer {
                         }
                     }
                     Ok(None) => {
-                        debug!("rust-analyzer stdout closed");
+                        debug!("LSP server stdout closed");
                         pending_requests.write().await.clear();
                         break;
                     }
@@ -265,8 +279,8 @@ impl RustAnalyzer {
         let mut proc_guard = self.process.lock().await;
 
         if let Some(mut child) = proc_guard.take() {
-            info!("Stopping rust-analyzer");
-            child.kill().await.context("Failed to kill rust-analyzer")?;
+            info!("Stopping LSP server");
+            child.kill().await.context("Failed to kill LSP server")?;
             *self.initialized.write().await = false;
             *self.stdin.lock().await = None;
             self.pending_requests.write().await.clear();
@@ -311,7 +325,7 @@ impl RustAnalyzer {
         let message = format!("Content-Length: {}\r\n\r\n{}", content.len(), content);
 
         let mut stdin_guard = self.stdin.lock().await;
-        let stdin = stdin_guard.as_mut().context("rust-analyzer not running")?;
+        let stdin = stdin_guard.as_mut().context("LSP server not running")?;
         stdin.write_all(message.as_bytes()).await?;
         stdin.flush().await?;
         drop(stdin_guard);
@@ -336,14 +350,14 @@ impl RustAnalyzer {
         let message = format!("Content-Length: {}\r\n\r\n{}", content.len(), content);
 
         let mut stdin_guard = self.stdin.lock().await;
-        let stdin = stdin_guard.as_mut().context("rust-analyzer not running")?;
+        let stdin = stdin_guard.as_mut().context("LSP server not running")?;
         stdin.write_all(message.as_bytes()).await?;
         stdin.flush().await?;
 
         Ok(())
     }
 
-    /// Notify rust-analyzer that a file was opened.
+    /// Notify LSP server that a file was opened.
     pub async fn did_open(&self, file_path: &Path, content: String) -> Result<()> {
         let uri = Uri::from_str(&format!("file://{}", file_path.display()))
             .map_err(|e| anyhow::anyhow!("Invalid file path: {}", e))?;
@@ -351,7 +365,7 @@ impl RustAnalyzer {
         let params = DidOpenTextDocumentParams {
             text_document: TextDocumentItem {
                 uri,
-                language_id: "rust".to_string(),
+                language_id: self.lang_id.clone(),
                 version: 1,
                 text: content,
             },
@@ -387,7 +401,7 @@ impl RustAnalyzer {
         character: u32,
     ) -> Result<Vec<Location>> {
         if !self.is_ready().await {
-            bail!("rust-analyzer not initialized");
+            bail!("LSP server not initialized");
         }
 
         let params = GotoDefinitionParams {
@@ -428,7 +442,7 @@ impl RustAnalyzer {
         include_declaration: bool,
     ) -> Result<Vec<Location>> {
         if !self.is_ready().await {
-            bail!("rust-analyzer not initialized");
+            bail!("LSP server not initialized");
         }
 
         let params = ReferenceParams {
@@ -460,7 +474,7 @@ impl RustAnalyzer {
         character: u32,
     ) -> Result<Option<Hover>> {
         if !self.is_ready().await {
-            bail!("rust-analyzer not initialized");
+            bail!("LSP server not initialized");
         }
 
         let params = HoverParams {
@@ -493,7 +507,7 @@ impl RustAnalyzer {
         character: u32,
     ) -> Result<Vec<CompletionItem>> {
         if !self.is_ready().await {
-            bail!("rust-analyzer not initialized");
+            bail!("LSP server not initialized");
         }
 
         let params = CompletionParams {
@@ -527,7 +541,7 @@ impl RustAnalyzer {
         end_line: u32,
     ) -> Result<Vec<InlayHint>> {
         if !self.is_ready().await {
-            bail!("rust-analyzer not initialized");
+            bail!("LSP server not initialized");
         }
 
         let params = InlayHintParams {
@@ -563,7 +577,7 @@ impl RustAnalyzer {
         diagnostics: Vec<Diagnostic>,
     ) -> Result<Vec<CodeActionOrCommand>> {
         if !self.is_ready().await {
-            bail!("rust-analyzer not initialized");
+            bail!("LSP server not initialized");
         }
 
         let params = CodeActionParams {
@@ -599,7 +613,7 @@ impl RustAnalyzer {
     /// Get document symbols (outline of structures, functions, etc.) for a file.
     pub async fn document_symbols(&self, file_path: &Path) -> Result<Vec<DocumentSymbol>> {
         if !self.is_ready().await {
-            bail!("rust-analyzer not initialized");
+            bail!("LSP server not initialized");
         }
 
         let params = DocumentSymbolParams {
@@ -641,7 +655,7 @@ impl RustAnalyzer {
     /// Search for symbols across the entire workspace.
     pub async fn workspace_symbols(&self, query: &str) -> Result<Vec<SymbolInformation>> {
         if !self.is_ready().await {
-            bail!("rust-analyzer not initialized");
+            bail!("LSP server not initialized");
         }
 
         let params = WorkspaceSymbolParams {
@@ -664,7 +678,7 @@ impl RustAnalyzer {
         character: u32,
     ) -> Result<Vec<Location>> {
         if !self.is_ready().await {
-            bail!("rust-analyzer not initialized");
+            bail!("LSP server not initialized");
         }
 
         let params = request::GotoImplementationParams {
@@ -706,7 +720,7 @@ impl RustAnalyzer {
         new_name: &str,
     ) -> Result<Option<WorkspaceEdit>> {
         if !self.is_ready().await {
-            bail!("rust-analyzer not initialized");
+            bail!("LSP server not initialized");
         }
 
         let params = RenameParams {
@@ -732,7 +746,7 @@ impl RustAnalyzer {
         character: u32,
     ) -> Result<Option<String>> {
         if !self.is_ready().await {
-            bail!("rust-analyzer not initialized");
+            bail!("LSP server not initialized");
         }
 
         #[derive(Serialize)]
@@ -771,7 +785,7 @@ impl RustAnalyzer {
         character: u32,
     ) -> Result<Vec<CallHierarchyItem>> {
         if !self.is_ready().await {
-            bail!("rust-analyzer not initialized");
+            bail!("LSP server not initialized");
         }
 
         let params = CallHierarchyPrepareParams {
@@ -798,7 +812,7 @@ impl RustAnalyzer {
         item: CallHierarchyItem,
     ) -> Result<Vec<CallHierarchyIncomingCall>> {
         if !self.is_ready().await {
-            bail!("rust-analyzer not initialized");
+            bail!("LSP server not initialized");
         }
 
         let params = CallHierarchyIncomingCallsParams {
@@ -820,7 +834,7 @@ impl RustAnalyzer {
         item: CallHierarchyItem,
     ) -> Result<Vec<CallHierarchyOutgoingCall>> {
         if !self.is_ready().await {
-            bail!("rust-analyzer not initialized");
+            bail!("LSP server not initialized");
         }
 
         let params = CallHierarchyOutgoingCallsParams {
@@ -837,7 +851,7 @@ impl RustAnalyzer {
     }
 }
 
-impl Drop for RustAnalyzer {
+impl Drop for GenericLspClient {
     fn drop(&mut self) {
         // Ensure process is killed when dropped
         if let Some(mut child) = self.process.try_lock().ok().and_then(|mut g| g.take()) {

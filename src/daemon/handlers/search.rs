@@ -314,6 +314,7 @@ pub async fn tool_search(args: Value, ctx: &ToolContext) -> Result<Value> {
     Ok(final_result)
 }
 
+#[allow(dead_code)]
 pub async fn tool_cross_stack_search(args: Value, ctx: &ToolContext) -> Result<Value> {
     let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
     let include_links = args

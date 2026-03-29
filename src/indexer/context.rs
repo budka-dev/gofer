@@ -19,12 +19,12 @@ pub async fn create_bundle(main_path: &Path, max_depth: u32) -> ContextBundle {
     let ext = main_path.extension().and_then(|e| e.to_str()).unwrap_or("");
     if let Some(language) = SupportedLanguage::from_extension(ext) {
         let mut parser = CodeParser::new();
-        let imports = parser.parse_imports(&main_content, language);
+        let imports = parser.parse_imports(&main_content, language.clone());
         let base_dir = main_path.parent().unwrap_or(Path::new("."));
 
         for import in imports {
             if import.is_relative {
-                if let Some(resolved) = resolve_import(&import.path, base_dir, language).await {
+                if let Some(resolved) = resolve_import(&import.path, base_dir, language.clone()).await {
                     collect_dependency(
                         &resolved,
                         &import.items.join(", "),
@@ -68,14 +68,14 @@ fn resolve_import<'a>(
             .trim_start_matches("./")
             .trim_start_matches("@/");
 
-        let extensions: &[&str] = match language {
-            SupportedLanguage::Rust => &["rs"],
-            SupportedLanguage::TypeScript => &["ts", "tsx", "js", "jsx"],
-            SupportedLanguage::JavaScript => &["js", "jsx", "ts", "tsx"],
-            SupportedLanguage::Vue => &["vue", "ts", "js"],
-            SupportedLanguage::Python => &["py"],
-            SupportedLanguage::Go => &["go"],
-        };
+        let extensions: &[&str] = match language.name() {
+            "rust" => &["rs"],
+            "typescript" => &["ts", "tsx", "js", "jsx"],
+            "javascript" => &["js", "jsx", "ts", "tsx"],
+            "vue" => &["vue", "ts", "js"],
+            "python" => &["py"],
+            "go" => &["go"],
+         _ => &[], };
 
         // 1. Прямой путь: base_dir/normalized.ext
         for ext in extensions {
@@ -129,7 +129,7 @@ fn resolve_import<'a>(
         }
 
         // 4. Python relative imports (from ..foo import bar → base_dir/../../foo.py)
-        if language == SupportedLanguage::Python && import_path.starts_with('.') {
+        if language.name() == "python" && import_path.starts_with('.') {
             let dots = import_path.chars().take_while(|c| *c == '.').count();
             let module = &import_path[dots..];
             let mut target_dir = base_dir.to_path_buf();
@@ -152,7 +152,7 @@ fn resolve_import<'a>(
         }
 
         // 5. Rust mod tree: base_dir/name.rs или base_dir/name/mod.rs
-        if language == SupportedLanguage::Rust && !normalized.contains('/') {
+        if language.name() == "rust" && !normalized.contains('/') {
             let candidate = base_dir.join(normalized).with_added_extension("rs");
             if candidate.exists() {
                 return Some(candidate);
@@ -262,13 +262,13 @@ fn collect_dependency<'a>(
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
             if let Some(language) = SupportedLanguage::from_extension(ext) {
                 let mut parser = CodeParser::new();
-                let imports = parser.parse_imports(&content, language);
+                let imports = parser.parse_imports(&content, language.clone());
                 let base_dir = path.parent().unwrap_or(Path::new("."));
 
                 for import in imports {
                     if import.is_relative {
                         if let Some(resolved) =
-                            resolve_import(&import.path, base_dir, language).await
+                            resolve_import(&import.path, base_dir, language.clone()).await
                         {
                             collect_dependency(
                                 &resolved,

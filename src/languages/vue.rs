@@ -5,7 +5,7 @@ use anyhow::Result;
 use regex::Regex;
 use serde::Serialize;
 use serde_json::{json, Value};
-use tree_sitter::{Language, Node, Parser};
+use tree_sitter::{Language, Node};
 
 use super::{LanguageService, ToolDefinition};
 use crate::storage::SqliteStorage;
@@ -70,8 +70,8 @@ impl LanguageService for VueService {
         vec![
             // --- Group 1: Component Interface ---
             ToolDefinition {
-                name: "vue_get_meta".into(),
-                description: "Extract Vue component contract: props, emits, slots. Supports both <script setup> (defineProps/defineEmits) and Options API.".into(),
+                name: "vue_get_meta".to_string(),
+                description: "Extract Vue component contract: props, emits, slots. Supports both <script setup> (defineProps/defineEmits) and Options API.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -84,8 +84,8 @@ impl LanguageService for VueService {
                 }),
             },
             ToolDefinition {
-                name: "vue_read_section".into(),
-                description: "Read a specific section of a Vue SFC: template, script, or style. Saves tokens by returning only what you need.".into(),
+                name: "vue_read_section".to_string(),
+                description: "Read a specific section of a Vue SFC: template, script, or style. Saves tokens by returning only what you need.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -104,8 +104,8 @@ impl LanguageService for VueService {
             },
             // --- Group 2: Component Graph ---
             ToolDefinition {
-                name: "vue_find_usages".into(),
-                description: "Find all files that import or use a given Vue component (handles PascalCase/kebab-case normalization).".into(),
+                name: "vue_find_usages".to_string(),
+                description: "Find all files that import or use a given Vue component (handles PascalCase/kebab-case normalization).".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -118,8 +118,8 @@ impl LanguageService for VueService {
                 }),
             },
             ToolDefinition {
-                name: "vue_resolve_component".into(),
-                description: "Resolve a component tag name to the file it is defined in, by analysing imports in a given context file.".into(),
+                name: "vue_resolve_component".to_string(),
+                description: "Resolve a component tag name to the file it is defined in, by analysing imports in a given context file.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -137,16 +137,16 @@ impl LanguageService for VueService {
             },
             // --- Group 3: App Structure ---
             ToolDefinition {
-                name: "vue_router_map".into(),
-                description: "Parse Vue Router configuration and return the route map: URL path -> component file.".into(),
+                name: "vue_router_map".to_string(),
+                description: "Parse Vue Router configuration and return the route map: URL path -> component file.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {}
                 }),
             },
             ToolDefinition {
-                name: "vue_pinia_stores".into(),
-                description: "Find all Pinia stores (defineStore) in the project and list their names, state fields, and actions.".into(),
+                name: "vue_pinia_stores".to_string(),
+                description: "Find all Pinia stores (defineStore) in the project and list their names, state fields, and actions.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {}
@@ -220,10 +220,12 @@ fn extract_section_ts_html(content: &str, tag: &str) -> Option<String> {
 }
 
 fn extract_section_with_attrs_ts_html(content: &str, tag: &str) -> Option<(String, String)> {
-    let mut parser = Parser::new();
-    let html_lang: Language = tree_sitter_html::LANGUAGE.into();
-    parser.set_language(&html_lang).ok()?;
-    let tree = parser.parse(content, None)?;
+    let html_lang: Language = crate::indexer::parser::LANG_MANAGER.get_language("html").expect("Lang not loaded").language.clone();
+    
+    let tree = crate::indexer::parser::with_parser(|parser| {
+        parser.set_language(&html_lang).ok()?;
+        parser.parse(content, None)
+    })?;
     let root = tree.root_node();
     let element_kind = format!("{}_element", tag);
 
@@ -345,14 +347,16 @@ fn component_name_from_path(path: &str) -> String {
 
 /// Extract defineProps using tree-sitter-typescript AST parsing
 fn extract_define_props(script: &str) -> Vec<PropInfo> {
-    let mut parser = Parser::new();
-    let ts_lang: Language = tree_sitter_typescript::LANGUAGE_TSX.into();
+    let ts_lang: Language = crate::indexer::parser::LANG_MANAGER.get_language("typescript").expect("Lang not loaded").language.clone();
 
-    if parser.set_language(&ts_lang).is_err() {
-        return extract_define_props_fallback(script);
-    }
+    let tree_opt = crate::indexer::parser::with_parser(|parser| {
+        if parser.set_language(&ts_lang).is_err() {
+            return None;
+        }
+        parser.parse(script, None)
+    });
 
-    let Some(tree) = parser.parse(script, None) else {
+    let Some(tree) = tree_opt else {
         return extract_define_props_fallback(script);
     };
 
@@ -475,7 +479,7 @@ fn extract_props_from_type_literal(obj: Node, source: &[u8], props: &mut Vec<Pro
                         if child.kind() == "?" {
                             required = false;
                         } else if child.kind() == "type_annotation" {
-                            if let Some(type_node) = child.child(1 as u32) {
+                            if let Some(type_node) = child.child(1_u32) {
                                 prop_type =
                                     Some(type_node.utf8_text(source).unwrap_or("any").to_string());
                             }
@@ -662,14 +666,16 @@ fn extract_define_props_fallback(script: &str) -> Vec<PropInfo> {
 
 /// Extract defineEmits using tree-sitter-typescript AST
 fn extract_define_emits(script: &str) -> Vec<String> {
-    let mut parser = Parser::new();
-    let ts_lang: Language = tree_sitter_typescript::LANGUAGE_TSX.into();
+    let ts_lang: Language = crate::indexer::parser::LANG_MANAGER.get_language("typescript").expect("Lang not loaded").language.clone();
 
-    if parser.set_language(&ts_lang).is_err() {
-        return extract_define_emits_fallback(script);
-    }
+    let tree_opt = crate::indexer::parser::with_parser(|parser| {
+        if parser.set_language(&ts_lang).is_err() {
+            return None;
+        }
+        parser.parse(script, None)
+    });
 
-    let Some(tree) = parser.parse(script, None) else {
+    let Some(tree) = tree_opt else {
         return extract_define_emits_fallback(script);
     };
 
@@ -1252,7 +1258,7 @@ impl VueService {
         }
 
         let Some((rel_path, abs_path)) = router_file else {
-            return Ok("# Vue Router Map\n\nNo router file found. Searched:\n- src/router/index.ts\n- src/router/index.js\n- src/router.ts\n- src/router.js\n".into());
+            return Ok("# Vue Router Map\n\nNo router file found. Searched:\n- src/router/index.ts\n- src/router/index.js\n- src/router.ts\n- src/router.js\n".to_string());
         };
 
         let content = tokio::fs::read_to_string(&abs_path).await?;
@@ -1276,7 +1282,7 @@ impl VueService {
             let name = name_re
                 .captures(rest)
                 .map(|c| c[1].to_string())
-                .unwrap_or_else(|| "-".into());
+                .unwrap_or_else(|| "-".to_string());
 
             let component = component_re
                 .captures(rest)
@@ -1286,7 +1292,7 @@ impl VueService {
                         .captures(rest)
                         .map(|c| format!("() => import('{}')", &c[1]))
                 })
-                .unwrap_or_else(|| "-".into());
+                .unwrap_or_else(|| "-".to_string());
 
             out.push_str(&format!("| `{}` | `{}` | {} |\n", path, component, name));
             found += 1;

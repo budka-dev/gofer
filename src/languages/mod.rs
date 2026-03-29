@@ -1,7 +1,7 @@
 pub mod go;
 pub mod python;
 pub mod rust;
-pub mod rust_analyzer;
+pub mod generic_lsp;
 pub mod typescript;
 pub mod vue;
 

@@ -48,6 +48,10 @@ pub struct DaemonState {
     pub embedding_circuit: Arc<CircuitBreaker>,
     /// Circuit breaker for vector search (Feature 016)
     pub vector_circuit: Arc<CircuitBreaker>,
+    /// Language manager for tracking and resolving languages
+    pub lang_manager: Arc<crate::indexer::parser::lang_manager::LanguageManager>,
+    /// Security approvals for sandbox code execution (id -> (command, oneshot_sender))
+    pub pending_confirmations: Arc<dashmap::DashMap<String, (String, tokio::sync::oneshot::Sender<bool>)>>,
 }
 
 /// Lock-free runtime metrics for the daemon process.
@@ -225,8 +229,8 @@ pub struct ProjectState {
     pub cancel: CancellationToken,
     /// Cache manager for this project
     pub cache: Arc<CacheManager>,
-    /// rust-analyzer instance for this project (lazy-loaded)
-    pub rust_analyzer: Arc<RwLock<Option<Arc<crate::languages::rust_analyzer::RustAnalyzer>>>>,
+    /// active LSP clients for this project (lazy-loaded per language)
+    pub lsp_clients: Arc<RwLock<HashMap<String, Arc<crate::languages::generic_lsp::GenericLspClient>>>>,
 }
 
 impl DaemonState {
@@ -269,7 +273,7 @@ impl DaemonState {
         ));
 
         Ok(Self {
-            gofer_home,
+            gofer_home: gofer_home.clone(),
             registry,
             embedder: Arc::new(embedder),
             projects: RwLock::new(HashMap::new()),
@@ -282,7 +286,25 @@ impl DaemonState {
             resource_limits: Arc::new(ResourceLimits::default()), // Feature 015
             embedding_circuit,                                    // Feature 016
             vector_circuit,                                       // Feature 016
+            lang_manager: Arc::new(crate::indexer::parser::lang_manager::LanguageManager::new(Some(gofer_home.clone().join("langs")), Some(gofer_home.clone().join("tools"))).unwrap_or_else(|_| crate::indexer::parser::lang_manager::LanguageManager::new(None, None).unwrap())),
+            pending_confirmations: Arc::new(dashmap::DashMap::new()),
         })
+    }
+
+    /// Ask the user for permission to execute a shell command.
+    /// Blocks until the user answers (via TUI) or 1 hour timeout.
+    pub async fn request_confirmation(&self, command: &str) -> bool {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let id = uuid::Uuid::new_v4().to_string();
+        self.pending_confirmations.insert(id.clone(), (command.to_string(), tx));
+        
+        match tokio::time::timeout(std::time::Duration::from_secs(3600), rx).await {
+            Ok(Ok(approved)) => approved,
+            _ => {
+                self.pending_confirmations.remove(&id);
+                false
+            }
+        }
     }
 
     /// Resolve a project path to a loaded ProjectState, loading it on demand.
@@ -406,7 +428,7 @@ impl DaemonState {
             watcher_active: Mutex::new(false),
             cancel: project_cancel,
             cache: cache.clone(),
-            rust_analyzer: Arc::new(RwLock::new(None)),
+            lsp_clients: Arc::new(RwLock::new(HashMap::new())),
         });
 
         // Spawn indexer worker — shares lance + embedder pool via Arc
@@ -464,7 +486,12 @@ impl DaemonState {
             PathBuf::from(project_path).join(".gofer")
         };
         let config = load_config(&gofer_dir);
-        let ignore_patterns = config.indexer.ignore.clone();
+        let mut ignore_patterns = config.indexer.ignore.clone();
+        for lang_entry in self.lang_manager.loaded_langs.iter() {
+            if let Some(indexer) = &lang_entry.value().manifest.indexer {
+                ignore_patterns.extend(indexer.ignore_folders.clone());
+            }
+        }
         let workers = config.indexer.parallel_workers.unwrap_or(4);
 
         // Full sync using shared lance + embedder pool (no redundant instances)
@@ -545,9 +572,10 @@ impl DaemonState {
 
         if let Some(id) = id_to_remove {
             if let Some(ps) = projects.remove(&id) {
-                // Stop rust-analyzer if running
-                if let Some(ra) = ps.rust_analyzer.write().await.take() {
-                    let _ = ra.stop().await;
+                // Stop LSP servers
+                let mut clients = ps.lsp_clients.write().await;
+                for (_, client) in clients.drain() {
+                    let _ = client.stop().await;
                 }
                 ps.cancel.cancel();
             }
@@ -556,43 +584,123 @@ impl DaemonState {
         Ok(())
     }
 
-    /// Get or start rust-analyzer instance for a project.
+    /// Get or start LSP client instance for a given file
     #[allow(dead_code)]
-    pub async fn get_rust_analyzer(
+    pub async fn get_lsp_client(
         &self,
         project_path: &str,
-    ) -> Result<Arc<crate::languages::rust_analyzer::RustAnalyzer>> {
+        file_path: &str,
+    ) -> Result<Option<Arc<crate::languages::generic_lsp::GenericLspClient>>> {
         let project = self.get_or_load_project(project_path).await?;
+        let ext = std::path::Path::new(file_path).extension().and_then(|e| e.to_str()).unwrap_or("");
+        
+        // 1. Resolve Language via lang_manager
+        let lang_name = match self.lang_manager.get_language_by_ext(ext) {
+            Some(l) => l,
+            None => return Ok(None) // No language support
+        };
+        
+        // 2. Load manifest to find LSP details
+        let loaded_lang = match self.lang_manager.loaded_langs.get(&lang_name) {
+            Some(l) => l,
+            None => return Ok(None)
+        };
+        
+        let lsp_config = match &loaded_lang.value().manifest.lsp {
+            Some(config) => config.clone(),
+            None => return Ok(None) // No LSP configured for this language
+        };
+
+        let lang_id = lsp_config.name.clone().unwrap_or_else(|| lang_name.clone());
 
         // Fast path: already initialized
         {
-            let ra_guard = project.rust_analyzer.read().await;
-            if let Some(ra) = ra_guard.as_ref() {
-                if ra.is_ready().await {
-                    return Ok(ra.clone());
+            let clients_guard = project.lsp_clients.read().await;
+            if let Some(client) = clients_guard.get(&lang_id) {
+                if client.is_ready().await {
+                    return Ok(Some(client.clone()));
                 }
             }
         }
 
-        // Slow path: initialize rust-analyzer
-        let mut ra_guard = project.rust_analyzer.write().await;
+        // Slow path: initialize LSP server
+        let mut clients_guard = project.lsp_clients.write().await;
 
         // Double-check in case another task initialized it while we were waiting
-        if let Some(ra) = ra_guard.as_ref() {
-            if ra.is_ready().await {
-                return Ok(ra.clone());
+        if let Some(client) = clients_guard.get(&lang_id) {
+            if client.is_ready().await {
+                return Ok(Some(client.clone()));
             }
         }
 
+        let command_str;
+        let mut tool_args = Vec::new();
+
+        if let Some(c) = &lsp_config.command {
+            command_str = c.clone();
+        } else if let Some(t) = &lsp_config.tool {
+            if let Some(tool_manifest) = self.lang_manager.get_tool(t) {
+                if let Some(lsp_tool_config) = &tool_manifest.lsp {
+                    let mut cmd = lsp_tool_config.command.clone();
+                    
+                    if let Some(install) = &tool_manifest.tool.install {
+                        let exe_name = &install.binary.executable_name;
+                        let local_exe = self.lang_manager.tools_dir.join(t).join("bin").join(exe_name);
+                        
+                        if !local_exe.exists() {
+                            tracing::info!("Tool executable {} not found locally. Attempting to download...", exe_name);
+                            if let Ok(path) = self.lang_manager.download_and_extract_binary(t, &tool_manifest).await {
+                                cmd = path.to_string_lossy().to_string();
+                            }
+                        } else {
+                            cmd = local_exe.to_string_lossy().to_string();
+                        }
+                    }
+
+                    command_str = cmd;
+                    tool_args = lsp_tool_config.args.clone();
+                } else {
+                    tracing::warn!("Tool {} does not have LSP capabilities", t);
+                    return Ok(None);
+                }
+            } else {
+                tracing::warn!("Tool {} not found in lang-hub", t);
+                return Ok(None);
+            }
+        } else {
+            return Ok(None);
+        }
+
         // Start new instance
-        let ra = Arc::new(crate::languages::rust_analyzer::RustAnalyzer::new(
-            project.path.clone(),
+        let shell_args = shell_words::split(&command_str).unwrap_or_else(|_| vec![command_str.clone()]);
+        let cmd = shell_args[0].clone();
+        let mut args: Vec<String> = shell_args.into_iter().skip(1).collect();
+        args.extend(tool_args);
+        
+        let root_path = project.path.clone();
+        let mut actual_root = root_path.clone();
+        if let Ok(file_path_buf) = crate::daemon::handlers::common::resolve_path_buf(&root_path, file_path) {
+            actual_root = crate::daemon::handlers::common::find_project_root(
+                &file_path_buf,
+                &loaded_lang.value().manifest.language.root_markers,
+                &root_path
+            );
+        }
+
+        let init_options = lsp_config.init_options.clone();
+
+        let client = Arc::new(crate::languages::generic_lsp::GenericLspClient::new(
+            actual_root,
+            cmd,
+            args,
+            lang_id.clone(),
+            init_options,
         ));
 
-        ra.start().await?;
-        *ra_guard = Some(ra.clone());
+        client.start().await?;
+        clients_guard.insert(lang_id.clone(), client.clone());
 
-        Ok(ra)
+        Ok(Some(client))
     }
 }
 

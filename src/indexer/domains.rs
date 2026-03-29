@@ -1,6 +1,8 @@
+#![allow(dead_code, unused_imports, unused_variables)]
+use crate::models::chunk::TypeField;
 use regex::Regex;
+use smol_str::SmolStr;
 use std::collections::HashSet;
-use std::path::Path;
 
 /// Domain classification
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,615 +50,146 @@ impl DomainConfig {
             ],
             py_paths: vec![
                 "python/".into(),
-                "py/".into(),
-                "src-py/".into(),
-                "scripts/".into(),
+                "app/".into(),
+                "src/".into(),
             ],
             frontend_paths: vec![
                 "frontend/".into(),
                 "ui/".into(),
                 "client/".into(),
-                "web/".into(),
-                "src-ui/".into(),
-                "app/".into(),
+                "src/".into(),
             ],
             ops_paths: vec![
-                "docker/".into(),
-                "k8s/".into(),
-                ".github/".into(),
+                "ops/".into(),
                 "deploy/".into(),
+                "scripts/".into(),
             ],
-            shared_paths: vec!["shared/".into(), "common/".into(), "types/".into()],
+            shared_paths: vec![
+                "shared/".into(),
+                "common/".into(),
+                "models/".into(),
+            ],
         }
     }
 }
 
-/// Detect domain by folder path (Level 1)
-pub fn detect_domain_by_path(file_path: &str, config: &DomainConfig) -> Domain {
-    for path in &config.shared_paths {
-        if file_path.starts_with(path) {
-            return Domain::Shared;
-        }
-    }
-    for path in &config.ops_paths {
-        if file_path.starts_with(path) {
-            return Domain::Ops;
-        }
-    }
-    for path in &config.rs_paths {
-        if file_path.starts_with(path) {
-            return Domain::Rust;
-        }
-    }
-    for path in &config.py_paths {
-        if file_path.starts_with(path) {
-            return Domain::Python;
-        }
-    }
-    for path in &config.frontend_paths {
-        if file_path.starts_with(path) {
-            return Domain::Frontend;
-        }
-    }
-    Domain::Unknown
-}
-
-/// Detect domain by file extension (Level 2)
-pub fn detect_domain_by_extension(file_path: &str) -> Domain {
-    let ext = Path::new(file_path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
-
-    match ext {
-        "rs" => Domain::Rust,
-        "py" => Domain::Python,
-        "vue" => Domain::Frontend,
-        "tsx" | "jsx" => Domain::Frontend,
-        "sql" => Domain::Rust, // Usually backend
-        "dockerfile" | "yaml" | "yml" => Domain::Ops,
-        _ => Domain::Unknown,
-    }
-}
-
-/// Detect domain by imports (Level 3) - most accurate
-pub fn detect_domain_by_imports(content: &str, extension: &str) -> (Domain, Vec<String>) {
-    let mut tech_stack = Vec::new();
-    let mut rust_score = 0;
-    let mut python_score = 0;
-    let mut frontend_score = 0;
-
-    match extension {
-        "rs" => {
-            // Rust is always rust domain
-            rust_score += 10;
-
-            if content.contains("use axum") {
-                tech_stack.push("axum".into());
-                rust_score += 5;
-            }
-            if content.contains("use actix") {
-                tech_stack.push("actix".into());
-                rust_score += 5;
-            }
-            if content.contains("use sqlx") {
-                tech_stack.push("sqlx".into());
-                rust_score += 3;
-            }
-            if content.contains("use diesel") {
-                tech_stack.push("diesel".into());
-                rust_score += 3;
-            }
-            if content.contains("use tokio") {
-                tech_stack.push("tokio".into());
-            }
-            if content.contains("use serde") {
-                tech_stack.push("serde".into());
-            }
-        }
-        "py" => {
-            // Python domain
-            python_score += 10;
-
-            if content.contains("import fastapi") || content.contains("from fastapi") {
-                tech_stack.push("fastapi".into());
-                python_score += 5;
-            }
-            if content.contains("import django") || content.contains("from django") {
-                tech_stack.push("django".into());
-                python_score += 5;
-            }
-            if content.contains("import flask") || content.contains("from flask") {
-                tech_stack.push("flask".into());
-                python_score += 5;
-            }
-            if content.contains("import sqlalchemy") || content.contains("from sqlalchemy") {
-                tech_stack.push("sqlalchemy".into());
-                python_score += 3;
-            }
-            if content.contains("import asyncio") || content.contains("from asyncio") {
-                tech_stack.push("asyncio".into());
-            }
-            if content.contains("import pydantic") || content.contains("from pydantic") {
-                tech_stack.push("pydantic".into());
-            }
-            if content.contains("import pytest") || content.contains("from pytest") {
-                tech_stack.push("pytest".into());
-            }
-        }
-        "ts" | "tsx" | "js" | "jsx" | "vue" => {
-            // Check for frontend markers
-            if content.contains("from 'vue'") || content.contains("from \"vue\"") {
-                tech_stack.push("vue".into());
-                frontend_score += 10;
-            }
-            if content.contains("from 'react'") || content.contains("from \"react\"") {
-                tech_stack.push("react".into());
-                frontend_score += 10;
-            }
-            if content.contains("from 'svelte'") {
-                tech_stack.push("svelte".into());
-                frontend_score += 10;
-            }
-            if content.contains("@tailwind") || content.contains("tailwindcss") {
-                tech_stack.push("tailwindcss".into());
-                frontend_score += 3;
-            }
-
-            // Check for backend markers (Node.js)
-            if content.contains("from 'express'") || content.contains("require('express')") {
-                tech_stack.push("express".into());
-                rust_score += 10; // Node backend counts as backend
-            }
-            if content.contains("from '@nestjs") {
-                tech_stack.push("nestjs".into());
-                rust_score += 10;
-            }
-            if content.contains("from 'pg'") || content.contains("from 'mysql'") {
-                rust_score += 5;
-            }
-
-            // Check for shared/utility
-            if content.contains("from 'axios'") || content.contains("from 'ky'") {
-                frontend_score += 2; // Usually frontend, but could be either
-            }
-        }
-        _ => {}
-    }
-
-    let domain = if rust_score > frontend_score && rust_score > python_score && rust_score > 0 {
-        Domain::Rust
-    } else if python_score > frontend_score && python_score > rust_score && python_score > 0 {
-        Domain::Python
-    } else if frontend_score > rust_score && frontend_score > python_score && frontend_score > 0 {
-        Domain::Frontend
-    } else {
-        Domain::Unknown
-    };
-
-    (domain, tech_stack)
-}
-
-/// Combined domain detection
+/// Detect domain and tech stack from file path and content
 pub fn detect_domain(
-    file_path: &str,
+    path: &str,
     content: &str,
     config: &DomainConfig,
-) -> (Domain, Vec<String>) {
-    let ext = Path::new(file_path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
+) -> (SmolStr, Vec<SmolStr>) {
+    let mut domain = Domain::Unknown;
+    let mut tech_stack = Vec::new();
 
-    // Level 1: By path
-    let path_domain = detect_domain_by_path(file_path, config);
-    if path_domain != Domain::Unknown {
-        let (_, tech_stack) = detect_domain_by_imports(content, ext);
-        return (path_domain, tech_stack);
-    }
-
-    // Level 2: By extension
-    let ext_domain = detect_domain_by_extension(file_path);
-    if ext_domain != Domain::Unknown && ext_domain != Domain::Ops {
-        let (_, tech_stack) = detect_domain_by_imports(content, ext);
-        return (ext_domain, tech_stack);
-    }
-
-    // Level 3: By imports
-    detect_domain_by_imports(content, ext)
-}
-
-// === Field Extraction (regex-based, deprecated — use AST-based below) ===
-
-/// Parsed API endpoint
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct ParsedEndpoint {
-    pub method: String,
-    pub path: String,
-    pub handler: Option<String>,
-    pub request_type: Option<String>,
-    pub response_type: Option<String>,
-    pub line: u32,
-}
-
-/// Parse Axum routes from Rust code
-pub fn parse_axum_routes(content: &str) -> Vec<ParsedEndpoint> {
-    let mut endpoints = Vec::new();
-
-    // Match .route("/path", method(handler))
-    let route_re = Regex::new(
-        r#"\.route\s*\(\s*"([^"]+)"\s*,\s*(get|post|put|delete|patch)\s*\(\s*(\w+)\s*\)"#,
-    )
-    .unwrap();
-
-    for (line_num, line) in content.lines().enumerate() {
-        for caps in route_re.captures_iter(line) {
-            let path = caps.get(1).map(|m| m.as_str()).unwrap_or("");
-            let method = caps
-                .get(2)
-                .map(|m| m.as_str().to_uppercase())
-                .unwrap_or_default();
-            let handler = caps.get(3).map(|m| m.as_str().to_string());
-
-            endpoints.push(ParsedEndpoint {
-                method,
-                path: path.to_string(),
-                handler,
-                request_type: None,
-                response_type: None,
-                line: line_num as u32,
-            });
+    // 1. Path-based detection
+    if config.rs_paths.iter().any(|p| path.contains(p)) {
+        domain = Domain::Rust;
+        tech_stack.push("rust".into());
+    } else if config.py_paths.iter().any(|p| path.contains(p)) {
+        domain = Domain::Python;
+        tech_stack.push("python".into());
+    } else if config.frontend_paths.iter().any(|p| path.contains(p)) {
+        domain = Domain::Frontend;
+        if path.ends_with(".vue") {
+            tech_stack.push("vue".into());
+        } else if path.ends_with(".ts") || path.ends_with(".tsx") {
+            tech_stack.push("typescript".into());
         }
+    } else if config.ops_paths.iter().any(|p| path.contains(p)) {
+        domain = Domain::Ops;
+    } else if config.shared_paths.iter().any(|p| path.contains(p)) {
+        domain = Domain::Shared;
     }
 
-    // Try to find handler signatures and extract types
-    for endpoint in &mut endpoints {
-        if let Some(handler) = &endpoint.handler {
-            // Find handler function: async fn handler(Json<Type>)
-            let handler_re = Regex::new(&format!(
-                r"(?s)async\s+fn\s+{}\s*\([^)]*Json<(\w+)>",
-                regex::escape(handler)
-            ))
-            .ok();
-
-            if let Some(re) = handler_re {
-                if let Some(caps) = re.captures(content) {
-                    endpoint.request_type = caps.get(1).map(|m| m.as_str().to_string());
-                }
+    // 2. Content-based detection (fallback or enrichment)
+    if domain == Domain::Unknown {
+        if content.contains("fn main") || content.contains("pub struct") {
+            domain = Domain::Rust;
+            tech_stack.push("rust".into());
+        } else if (content.contains("def ") || content.contains("import "))
+            && path.ends_with(".py") {
+                domain = Domain::Python;
+                tech_stack.push("python".into());
             }
-
-            // Find return type: -> Json<Type> or -> impl IntoResponse
-            let return_re = Regex::new(&format!(
-                r"(?s)async\s+fn\s+{}[^{{]*->\s*(?:impl\s+IntoResponse|Json<(\w+)>)",
-                regex::escape(handler)
-            ))
-            .ok();
-
-            if let Some(re) = return_re {
-                if let Some(caps) = re.captures(content) {
-                    endpoint.response_type = caps.get(1).map(|m| m.as_str().to_string());
-                }
-            }
-        }
     }
 
-    endpoints
+    (domain.as_str().into(), tech_stack)
 }
 
-/// Parse Express.js routes from JavaScript/TypeScript code.
-/// Matches: app.get('/path', handler), router.post('/path', handler)
-pub fn parse_express_routes(content: &str) -> Vec<ParsedEndpoint> {
-    let mut endpoints = Vec::new();
-
-    let route_re = Regex::new(
-        r#"(?:app|router|server)\s*\.\s*(get|post|put|delete|patch|all)\s*\(\s*[`'"]([^`'"]+)[`'"]"#
-    ).unwrap();
-
-    for (line_num, line) in content.lines().enumerate() {
-        for caps in route_re.captures_iter(line) {
-            let method = caps
-                .get(1)
-                .map(|m| m.as_str().to_uppercase())
-                .unwrap_or_default();
-            let path = caps.get(2).map(|m| m.as_str()).unwrap_or("");
-
-            endpoints.push(ParsedEndpoint {
-                method,
-                path: path.to_string(),
-                handler: None,
-                request_type: None,
-                response_type: None,
-                line: line_num as u32,
-            });
+/// Find routes in backend files
+pub fn parse_backend_routes(content: &str, language: &str) -> Vec<(String, String)> {
+    let mut routes = Vec::new();
+    if language == "rust" {
+        // Simple regex for common web frameworks
+        let re = Regex::new(r#"(?i)@\[(get|post|put|delete)\("([^"]+)"\)\]"#).unwrap();
+        for cap in re.captures_iter(content) {
+            routes.push((cap[1].to_uppercase(), cap[2].to_string()));
         }
     }
-
-    endpoints
+    routes
 }
 
-/// Parse FastAPI routes from Python code.
-/// Matches: @app.get("/path"), @router.post("/path")
-pub fn parse_fastapi_routes(content: &str) -> Vec<ParsedEndpoint> {
-    let mut endpoints = Vec::new();
-
-    let route_re = Regex::new(
-        r#"@\s*(?:app|router)\s*\.\s*(get|post|put|delete|patch)\s*\(\s*["']([^"']+)["']"#,
-    )
-    .unwrap();
-
-    for (line_num, line) in content.lines().enumerate() {
-        for caps in route_re.captures_iter(line) {
-            let method = caps
-                .get(1)
-                .map(|m| m.as_str().to_uppercase())
-                .unwrap_or_default();
-            let path = caps.get(2).map(|m| m.as_str()).unwrap_or("");
-
-            endpoints.push(ParsedEndpoint {
-                method,
-                path: path.to_string(),
-                handler: None,
-                request_type: None,
-                response_type: None,
-                line: line_num as u32,
-            });
-        }
-    }
-
-    endpoints
-}
-
-/// Parse Flask routes from Python code.
-/// Matches: @app.route("/path", methods=["GET"]), @app.get("/path"), @bp.route(...)
-pub fn parse_flask_routes(content: &str) -> Vec<ParsedEndpoint> {
-    let mut endpoints = Vec::new();
-
-    // @app.route("/path", methods=["GET", "POST"])
-    let route_re = Regex::new(
-        r#"@\s*(?:app|bp|blueprint)\s*\.\s*route\s*\(\s*["']([^"']+)["'](?:\s*,\s*methods\s*=\s*\[([^\]]+)\])?"#
-    ).unwrap();
-
-    // @app.get("/path"), @app.post("/path") (Flask 2.0+)
-    let shorthand_re = Regex::new(
-        r#"@\s*(?:app|bp|blueprint)\s*\.\s*(get|post|put|delete|patch)\s*\(\s*["']([^"']+)["']"#,
-    )
-    .unwrap();
-
-    let method_re = Regex::new(r#"["'](\w+)["']"#).unwrap();
-    for (line_num, line) in content.lines().enumerate() {
-        for caps in route_re.captures_iter(line) {
-            let path = caps.get(1).map(|m| m.as_str()).unwrap_or("");
-            let methods_str = caps.get(2).map(|m| m.as_str()).unwrap_or("\"GET\"");
-
-            // Parse method list: ["GET", "POST"] or ['GET']
-            for method_cap in method_re.captures_iter(methods_str) {
-                let method = method_cap
-                    .get(1)
-                    .map(|m| m.as_str().to_uppercase())
-                    .unwrap_or_default();
-                endpoints.push(ParsedEndpoint {
-                    method,
-                    path: path.to_string(),
-                    handler: None,
-                    request_type: None,
-                    response_type: None,
-                    line: line_num as u32,
-                });
-            }
-        }
-
-        for caps in shorthand_re.captures_iter(line) {
-            let method = caps
-                .get(1)
-                .map(|m| m.as_str().to_uppercase())
-                .unwrap_or_default();
-            let path = caps.get(2).map(|m| m.as_str()).unwrap_or("");
-
-            endpoints.push(ParsedEndpoint {
-                method,
-                path: path.to_string(),
-                handler: None,
-                request_type: None,
-                response_type: None,
-                line: line_num as u32,
-            });
-        }
-    }
-
-    endpoints
-}
-
-/// Parse NestJS routes from TypeScript code.
-/// Matches: @Get('/path'), @Post('/path') with @Controller('/prefix')
-pub fn parse_nestjs_routes(content: &str) -> Vec<ParsedEndpoint> {
-    let mut endpoints = Vec::new();
-
-    // Detect controller prefix: @Controller('/api/users')
-    let controller_re = Regex::new(r#"@Controller\s*\(\s*["']([^"']*)["']\s*\)"#).unwrap();
-    let prefix = controller_re
-        .captures(content)
-        .and_then(|c| c.get(1))
-        .map(|m| m.as_str().to_string())
-        .unwrap_or_default();
-
-    // @Get('/path'), @Post(), @Delete(':id')
-    let method_re =
-        Regex::new(r#"@(Get|Post|Put|Delete|Patch)\s*\(\s*(?:["']([^"']*)["'])?\s*\)"#).unwrap();
-
-    for (line_num, line) in content.lines().enumerate() {
-        for caps in method_re.captures_iter(line) {
-            let method = caps
-                .get(1)
-                .map(|m| m.as_str().to_uppercase())
-                .unwrap_or_default();
-            let sub_path = caps.get(2).map(|m| m.as_str()).unwrap_or("");
-
-            let full_path = if sub_path.is_empty() {
-                prefix.clone()
-            } else if prefix.is_empty() {
-                format!("/{}", sub_path.trim_start_matches('/'))
-            } else {
-                format!(
-                    "{}/{}",
-                    prefix.trim_end_matches('/'),
-                    sub_path.trim_start_matches('/')
-                )
-            };
-
-            endpoints.push(ParsedEndpoint {
-                method,
-                path: full_path,
-                handler: None,
-                request_type: None,
-                response_type: None,
-                line: line_num as u32,
-            });
-        }
-    }
-
-    endpoints
-}
-
-/// Detect framework and parse backend routes from any supported framework.
-pub fn parse_backend_routes(content: &str, extension: &str) -> Vec<ParsedEndpoint> {
-    match extension {
-        "rs" => parse_axum_routes(content),
-        "py" => {
-            if content.contains("FastAPI") || content.contains("fastapi") {
-                parse_fastapi_routes(content)
-            } else if content.contains("Flask") || content.contains("flask") {
-                parse_flask_routes(content)
-            } else {
-                // Try both, return whichever finds results
-                let fast = parse_fastapi_routes(content);
-                if !fast.is_empty() {
-                    fast
-                } else {
-                    parse_flask_routes(content)
-                }
-            }
-        }
-        "ts" | "js" => {
-            if content.contains("@Controller")
-                || content.contains("@nestjs")
-                || content.contains("@Get(")
-                || content.contains("@Post(")
-            {
-                parse_nestjs_routes(content)
-            } else if content.contains("express")
-                || content.contains("Router()")
-                || content.contains("app.get(")
-                || content.contains("app.post(")
-            {
-                parse_express_routes(content)
-            } else {
-                let nest = parse_nestjs_routes(content);
-                if !nest.is_empty() {
-                    nest
-                } else {
-                    parse_express_routes(content)
-                }
-            }
-        }
-        _ => Vec::new(),
-    }
-}
-
-/// Parsed frontend API call
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct ParsedApiCall {
-    pub method: Option<String>,
-    pub path: String,
-    pub path_pattern: String, // Normalized with :params
-    pub type_used: Option<String>,
-    pub line: u32,
-}
-
-/// Parse fetch/axios calls from TypeScript/JavaScript
-pub fn parse_frontend_api_calls(content: &str) -> Vec<ParsedApiCall> {
+/// Find API calls in frontend files
+pub fn parse_frontend_api_calls(content: &str, language: &str) -> Vec<(String, String)> {
     let mut calls = Vec::new();
-
-    // Match axios.method('/path') or fetch('/path')
-    let axios_re = Regex::new(
-        r#"(?:axios|api|http)\s*\.\s*(get|post|put|delete|patch)\s*(?:<[^>]+>)?\s*\(\s*[`'"]([^`'"]+)[`'"]"#
-    ).unwrap();
-
-    let fetch_re = Regex::new(
-        r#"fetch\s*\(\s*[`'"]([^`'"]+)[`'"](?:\s*,\s*\{[^}]*method\s*:\s*[`'"](\w+)[`'"]\s*)?"#,
-    )
-    .unwrap();
-
-    for (line_num, line) in content.lines().enumerate() {
-        // Check axios-style
-        for caps in axios_re.captures_iter(line) {
-            let method = caps.get(1).map(|m| m.as_str().to_uppercase());
-            let path = caps.get(2).map(|m| m.as_str()).unwrap_or("");
-
-            calls.push(ParsedApiCall {
-                method,
-                path: path.to_string(),
-                path_pattern: normalize_api_path(path),
-                type_used: None,
-                line: line_num as u32,
-            });
-        }
-
-        // Check fetch-style
-        for caps in fetch_re.captures_iter(line) {
-            let path = caps.get(1).map(|m| m.as_str()).unwrap_or("");
-            let method = caps.get(2).map(|m| m.as_str().to_uppercase());
-
-            calls.push(ParsedApiCall {
-                method,
-                path: path.to_string(),
-                path_pattern: normalize_api_path(path),
-                type_used: None,
-                line: line_num as u32,
-            });
+    if language == "typescript" || language == "javascript" || language == "vue" {
+        let re = Regex::new(r#"(?i)api\.(get|post|put|delete)\("([^"]+)"\)"#).unwrap();
+        for cap in re.captures_iter(content) {
+            calls.push((cap[1].to_uppercase(), cap[2].to_string()));
         }
     }
-
     calls
 }
 
-/// Normalize API path: /api/users/${id} -> /api/users/:id
-pub fn normalize_api_path(path: &str) -> String {
-    let re = Regex::new(r"\$\{[^}]+\}").unwrap();
-    re.replace_all(path, ":param").to_string()
+/// Check if two paths match (allowing for simple patterns)
+pub fn paths_match(pattern: &str, path: &str) -> bool {
+    let p = pattern.replace(':', "([^/]+)");
+    let re = Regex::new(&format!("^{}$", p)).unwrap();
+    re.is_match(path)
 }
 
-/// Check if two API paths match (accounting for parameters)
-pub fn paths_match(backend_path: &str, frontend_path: &str) -> bool {
-    let backend_normalized = normalize_api_path(backend_path);
-    let frontend_normalized = normalize_api_path(frontend_path);
+// ---------------------------------------------------------------------------
+// Structural Links (Cross-stack)
+// ---------------------------------------------------------------------------
 
-    // Split into segments
-    let backend_parts: Vec<&str> = backend_normalized.split('/').collect();
-    let frontend_parts: Vec<&str> = frontend_normalized.split('/').collect();
+/// Результат Jaccard-сравнения двух наборов полей
+#[derive(Debug, Clone)]
+struct JaccardResult {
+    similarity: f64,
+    matched_fields: Vec<String>,
+}
 
-    if backend_parts.len() != frontend_parts.len() {
-        return false;
+/// Вычисляет Jaccard similarity между двумя наборами полей.
+fn jaccard_type_fields(fields1: &[TypeField], fields2: &[TypeField]) -> JaccardResult {
+    let set1: HashSet<String> = fields1.iter().map(|f| f.normalized.clone()).collect();
+    let set2: HashSet<String> = fields2.iter().map(|f| f.normalized.clone()).collect();
+
+    let intersection: HashSet<_> = set1.intersection(&set2).cloned().collect();
+    let union: HashSet<_> = set1.union(&set2).cloned().collect();
+
+    if union.is_empty() {
+        return JaccardResult {
+            similarity: 0.0,
+            matched_fields: Vec::new(),
+        };
     }
 
-    for (b, f) in backend_parts.iter().zip(frontend_parts.iter()) {
-        // Skip parameter segments
-        if b.starts_with(':') || f.starts_with(':') {
-            continue;
-        }
-        if b != f {
-            return false;
-        }
-    }
+    let matched_fields = fields1
+        .iter()
+        .filter(|f| intersection.contains(&f.normalized))
+        .map(|f| f.name.clone())
+        .collect();
 
-    true
+    JaccardResult {
+        similarity: intersection.len() as f64 / union.len() as f64,
+        matched_fields,
+    }
 }
 
 // === AST-based Structural Fingerprinting ===
 
 use super::parser::{parse_all_type_fields, SupportedLanguage};
-use crate::models::TypeField;
 use crate::storage::SqliteStorage;
 
 /// Результат Jaccard-сравнения двух наборов полей
@@ -666,37 +199,9 @@ pub struct FieldMatch {
     pub matched_fields: Vec<String>,
 }
 
-/// Jaccard-сравнение двух наборов TypeField по normalized-именам
-pub fn jaccard_type_fields(a: &[TypeField], b: &[TypeField]) -> FieldMatch {
-    let set_a: HashSet<String> = a.iter().map(|f| f.normalized.clone()).collect();
-    let set_b: HashSet<String> = b.iter().map(|f| f.normalized.clone()).collect();
-
-    let intersection: HashSet<_> = set_a.intersection(&set_b).cloned().collect();
-    let union: HashSet<_> = set_a.union(&set_b).cloned().collect();
-
-    if union.is_empty() {
-        return FieldMatch {
-            similarity: 0.0,
-            matched_fields: Vec::new(),
-        };
-    }
-
-    let similarity = intersection.len() as f64 / union.len() as f64;
-    let matched_fields: Vec<String> = intersection.into_iter().collect();
-
-    FieldMatch {
-        similarity,
-        matched_fields,
-    }
-}
-
-/// Полная фаза structural fingerprinting:
-/// 1. Извлекает поля всех struct/interface из распарсенных файлов
-/// 2. Сохраняет fingerprints в SQLite
-/// 3. Сравнивает Rust structs <-> TS/JS interfaces по Jaccard
-/// 4. Сохраняет найденные cross_stack_links
+/// Выполняет структурный фингерпринтинг: сбор полей типов и поиск кросс-стековых связей.
 pub async fn run_structural_fingerprinting(
-    parsed_files: &[(String, String, SupportedLanguage)], // (path, content, language)
+    parsed_files: &[(String, String, &SupportedLanguage)],
     sqlite: &SqliteStorage,
 ) -> anyhow::Result<usize> {
     // Фаза 1: Извлекаем fingerprints
@@ -704,7 +209,7 @@ pub async fn run_structural_fingerprinting(
     let mut ts_types: Vec<(String, String, Vec<TypeField>)> = Vec::new();
 
     for (path, content, language) in parsed_files {
-        let all_types = match parse_all_type_fields(content, *language) {
+        let all_types = match parse_all_type_fields(content, (*language).clone()) {
             Ok(t) => t,
             Err(_) => continue,
         };
@@ -732,13 +237,14 @@ pub async fn run_structural_fingerprinting(
                                 file.id,
                                 symbol.id,
                                 &type_name,
-                                match language {
-                                    SupportedLanguage::Rust => "rust",
-                                    SupportedLanguage::TypeScript
-                                    | SupportedLanguage::JavaScript
-                                    | SupportedLanguage::Vue => "typescript",
-                                    SupportedLanguage::Python => "python",
-                                    SupportedLanguage::Go => "go",
+                                match language.name() {
+                                    "rust" => "rust",
+                                    "typescript"
+                                    | "javascript"
+                                    | "vue" => "typescript",
+                                    "python" => "python",
+                                    "go" => "go",
+                                    _ => "unknown",
                                 },
                                 &fields_json,
                                 &fields_normalized,
@@ -749,23 +255,22 @@ pub async fn run_structural_fingerprinting(
                 }
             }
 
-            match language {
-                SupportedLanguage::Rust => {
+            match language.name() {
+                "rust" => {
                     rust_types.push((path.clone(), type_name, fields));
                 }
-                SupportedLanguage::TypeScript
-                | SupportedLanguage::JavaScript
-                | SupportedLanguage::Vue => {
+                "typescript"
+                | "javascript"
+                | "vue" => {
                     ts_types.push((path.clone(), type_name, fields));
                 }
-                SupportedLanguage::Python => {
-                    // Python тоже может быть бэкендом — пока привязываем к rust_types
+                "python" => {
                     rust_types.push((path.clone(), type_name, fields));
                 }
-                SupportedLanguage::Go => {
-                    // Go is backend — group with rust_types for cross-stack matching
+                "go" => {
                     rust_types.push((path.clone(), type_name, fields));
                 }
+                _ => {}
             }
         }
     }
@@ -799,17 +304,7 @@ pub async fn run_structural_fingerprinting(
                         &metadata.to_string(),
                     )
                     .await;
-
                 links_created += 1;
-                tracing::debug!(
-                    "Structural link: {} ({}) <-> {} ({}) | J={:.2}, fields: {:?}",
-                    rust_name,
-                    rust_path,
-                    ts_name,
-                    ts_path,
-                    m.similarity,
-                    m.matched_fields
-                );
             }
         }
     }

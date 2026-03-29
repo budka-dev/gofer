@@ -149,12 +149,12 @@ pub async fn run_pipeline(
     // Parser workers — each gets a clone of the shared receiver
     let mut h_parsers: Vec<JoinHandle<anyhow::Result<()>>> = Vec::with_capacity(num_workers);
     for _ in 0..num_workers {
-        let rx = scan_rx.clone();
-        let tx = parse_tx.clone();
-        let prog = progress.clone();
-        let cancel_parser = cancel.clone();
+        let rx_clone = scan_rx.clone();
+        let tx_clone = parse_tx.clone();
+        let prog_clone = progress.clone();
+        let cancel_clone = cancel.clone();
         h_parsers.push(tokio::spawn(async move {
-            parser_worker(rx, tx, prog, cancel_parser).await
+            parser_worker(rx_clone, tx_clone, prog_clone, cancel_clone).await
         }));
     }
     drop(parse_tx); // Only worker clones hold senders now
@@ -432,7 +432,7 @@ async fn parser_worker(
             let content_ref = &*scanned.content;
 
             // Single-pass parse: symbols + chunks + refs + imports from one tree
-            let parsed_file = match parser.parse_file(content_ref, &scanned.path, scanned.language)
+            let parsed_file = match parser.parse_file(content_ref, &scanned.path, scanned.language.clone())
             {
                 Ok(pf) => pf,
                 Err(e) => {
@@ -454,7 +454,7 @@ async fn parser_worker(
                 refs: parsed_file.refs,
                 imports: parsed_file.imports,
                 domain: SmolStr::from(domain.as_str()),
-                tech_stack: tech_stack.into_iter().map(SmolStr::from).collect(),
+                tech_stack: tech_stack.into_iter().collect(),
                 content: scanned.content,
             })
         })
@@ -1011,14 +1011,14 @@ async fn flush_sqlite_batch(
 
         // 2. Update domain, language, and indexing status
         let tech_json = serde_json::to_string(&file_meta.tech_stack).unwrap_or_default();
-        let language_str = match file_meta.language {
-            SupportedLanguage::Rust => "rust",
-            SupportedLanguage::TypeScript => "typescript",
-            SupportedLanguage::JavaScript => "javascript",
-            SupportedLanguage::Python => "python",
-            SupportedLanguage::Go => "go",
-            SupportedLanguage::Vue => "vue",
-        };
+        let language_str = match file_meta.language.name() {
+            "rust" => "rust",
+            "typescript" => "typescript",
+            "javascript" => "javascript",
+            "python" => "python",
+            "go" => "go",
+            "vue" => "vue",
+         _ => "unknown" };
         let now = chrono::Utc::now().timestamp();
 
         let _ = sqlx::query(
@@ -1060,26 +1060,27 @@ async fn flush_sqlite_batch(
             .execute(&mut *tx)
             .await;
 
-        let ecosystem = match file_meta.language {
-            SupportedLanguage::Rust => "cargo",
-            SupportedLanguage::TypeScript
-            | SupportedLanguage::JavaScript
-            | SupportedLanguage::Vue => "npm",
-            SupportedLanguage::Python => "pip",
-            SupportedLanguage::Go => "go",
+        let ecosystem = match file_meta.language.name() {
+            "rust" => "cargo",
+            "typescript"
+            | "javascript"
+            | "vue" => "npm",
+            "python" => "pip",
+            "go" => "go",
+            _ => "unknown"
         };
 
         for import in &file_meta.imports {
             if !import.is_relative {
-                let pkg_name = extract_package_name(&import.path, file_meta.language);
+                let pkg_name = extract_package_name(&import.path, file_meta.language.clone());
                 let items_json = if !import.items.is_empty() {
                     Some(serde_json::to_string(&import.items).unwrap_or_default())
                 } else {
                     None
                 };
-                let usage_type = match file_meta.language {
-                    SupportedLanguage::Rust => "use",
-                    _ => "import",
+                let usage_type = match file_meta.language.name() {
+                    "rust" => "use",
+                    _ => "unknown"
                 };
 
                 // Find or create dependency
@@ -1219,13 +1220,13 @@ async fn flush_sqlite_batch(
 // ---------------------------------------------------------------------------
 
 pub(crate) fn extract_package_name(import_path: &str, language: SupportedLanguage) -> String {
-    match language {
-        SupportedLanguage::Rust => import_path
+    match language.name() {
+        "rust" => import_path
             .split("::")
             .next()
             .unwrap_or(import_path)
             .to_string(),
-        SupportedLanguage::TypeScript | SupportedLanguage::JavaScript | SupportedLanguage::Vue => {
+        "typescript" | "javascript" | "vue" => {
             if import_path.starts_with('@') {
                 let parts: Vec<&str> = import_path.split('/').collect();
                 if parts.len() >= 2 {
@@ -1241,12 +1242,12 @@ pub(crate) fn extract_package_name(import_path: &str, language: SupportedLanguag
                     .to_string()
             }
         }
-        SupportedLanguage::Python => import_path
+        "python" => import_path
             .split('.')
             .next()
             .unwrap_or(import_path)
             .to_string(),
-        SupportedLanguage::Go => {
+        "go" => {
             // Go import paths like "github.com/user/repo/pkg" — use last segment
             import_path
                 .rsplit('/')
@@ -1254,5 +1255,6 @@ pub(crate) fn extract_package_name(import_path: &str, language: SupportedLanguag
                 .unwrap_or(import_path)
                 .to_string()
         }
+        _ => import_path.to_string(),
     }
 }
