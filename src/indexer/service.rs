@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::domains::run_structural_fingerprinting;
@@ -46,49 +46,31 @@ impl IndexerService {
         self
     }
 
-    /// Run the indexer worker that processes tasks from the channel
-    /// Uses bounded parallelism to process multiple files concurrently without overloading resources.
-    pub async fn run(self, mut rx: mpsc::Receiver<IndexTask>) {
+    pub async fn run(self, mut rx: mpsc::Receiver<Vec<IndexTask>>) {
         tracing::info!(
-            "Indexer service started with {} workers",
+            "Indexer service started with {} workers (used for SEDA)",
             self.parallel_workers
         );
 
-        // Limit concurrent indexing tasks to avoid OOM or embedding bottlenecks
-        let semaphore = Arc::new(Semaphore::new(self.parallel_workers));
-
-        while let Some(first_task) = rx.recv().await {
-            // Buffer tasks dynamically to handle event storms (e.g. git checkout)
-            let mut tasks = vec![first_task];
-            while let Ok(task) = rx.try_recv() {
-                tasks.push(task);
-                if tasks.len() >= 10000 {
-                    break;
-                }
-            }
-
+        while let Some(batch) = rx.recv().await {
             let mut to_reindex = Vec::new();
             let mut to_delete = Vec::new();
-            for task in tasks {
+            for task in batch {
                 match task {
                     IndexTask::Reindex(path) => to_reindex.push(path),
                     IndexTask::Delete(path) => to_delete.push(path),
                 }
             }
 
+            let mut needs_resolve = false;
+
             // Process deletes individually
             for path in to_delete {
-                let permit = match semaphore.clone().acquire_owned().await {
-                    Ok(p) => p,
-                    Err(_) => break, // Semaphore closed
-                };
-                let service = self.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = service.delete_file(&path).await {
-                        tracing::error!("Failed to delete {:?}: {}", path, e);
-                    }
-                    drop(permit);
-                });
+                if let Err(e) = self.delete_file(&path).await {
+                    tracing::error!("Failed to delete {:?}: {}", path, e);
+                } else {
+                    needs_resolve = true;
+                }
             }
 
             // Process reindexing
@@ -114,19 +96,24 @@ impl IndexerService {
                     }
                 });
             } else {
-                // Small trickle: Hand off to individual tasks
+                // Small trickle: Process sequentially to eliminate SQLite lock contention
                 for path in to_reindex {
-                    let permit = match semaphore.clone().acquire_owned().await {
-                        Ok(p) => p,
-                        Err(_) => break,
-                    };
-                    let service = self.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = service.index_file(&path).await {
-                            tracing::error!("Failed to index {:?}: {}", path, e);
+                    if let Err(e) = self.index_file(&path).await {
+                        tracing::error!("Failed to index {:?}: {}", path, e);
+                    } else {
+                        needs_resolve = true;
+                    }
+                }
+            }
+
+            if needs_resolve {
+                match self.sqlite.resolve_references().await {
+                    Ok(resolved) => {
+                        if resolved > 0 {
+                            tracing::debug!("Sequentially resolved {} references", resolved);
                         }
-                        drop(permit);
-                    });
+                    }
+                    Err(e) => tracing::error!("Failed to resolve references sequentially: {:?}", e),
                 }
             }
         }
@@ -260,12 +247,6 @@ impl IndexerService {
                     .await?;
             }
         }
-
-        let resolved = self.sqlite.resolve_references().await?;
-        if resolved > 0 {
-            tracing::debug!("Resolved {} references", resolved);
-        }
-
         tracing::info!(
             "⚡ Incrementally indexed {:?}: {} symbols, {} chunks, {} refs",
             path,

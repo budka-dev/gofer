@@ -121,6 +121,118 @@ fn strip_json_comments(input: &str) -> String {
     out
 }
 
+/// Walk up from the requested file to find the closest tsconfig.json that
+/// includes it. Falls back to any tsconfig found along the way.
+fn find_tsconfig_for(root: &Path, rel_file: &str) -> Option<PathBuf> {
+    let abs_file = root.join(rel_file);
+    let mut cur = abs_file.parent()?;
+    loop {
+        for name in &["tsconfig.json", "tsconfig.app.json", "jsconfig.json"] {
+            let candidate = cur.join(name);
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+        if cur == root {
+            return None;
+        }
+        match cur.parent() {
+            Some(p) => cur = p,
+            None => return None,
+        }
+    }
+}
+
+/// Discover all tsconfig.json files reachable from the project root, including
+/// those inside Bun/pnpm/yarn workspaces declared in the root package.json.
+pub(crate) fn discover_workspace_tsconfigs(root: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+
+    // 1. Root tsconfig — common case
+    for name in &["tsconfig.json", "tsconfig.app.json"] {
+        let p = root.join(name);
+        if p.exists() {
+            out.push(p);
+        }
+    }
+
+    // 2. package.json workspaces — handles Bun, pnpm (when "workspaces" is mirrored
+    //    into package.json), yarn classic
+    let pkg_path = root.join("package.json");
+    if let Ok(raw) = std::fs::read_to_string(&pkg_path) {
+        if let Ok(pkg) = serde_json::from_str::<Value>(&raw) {
+            let patterns = match pkg.get("workspaces") {
+                Some(Value::Array(arr)) => arr
+                    .iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect::<Vec<_>>(),
+                Some(Value::Object(obj)) => obj
+                    .get("packages")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            for pat in patterns {
+                expand_workspace_pattern(root, &pat, &mut out);
+            }
+        }
+    }
+
+    // 3. pnpm-workspace.yaml — best-effort plain text scan to keep deps thin
+    let pnpm_ws = root.join("pnpm-workspace.yaml");
+    if let Ok(raw) = std::fs::read_to_string(&pnpm_ws) {
+        for line in raw.lines() {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed
+                .strip_prefix("- ")
+                .or_else(|| trimmed.strip_prefix("- \""))
+                .or_else(|| trimmed.strip_prefix("- '"))
+            {
+                let pat = rest.trim_end_matches(['"', '\'']).to_string();
+                if !pat.is_empty() {
+                    expand_workspace_pattern(root, &pat, &mut out);
+                }
+            }
+        }
+    }
+
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn expand_workspace_pattern(root: &Path, pattern: &str, out: &mut Vec<PathBuf>) {
+    // Only expand simple `dir/*` and literal `dir/sub` patterns. Anything more
+    // exotic (recursive globs, negations) we ignore — adding a glob crate just
+    // for tsconfig discovery isn't worth the dependency weight.
+    if let Some(prefix) = pattern.strip_suffix("/*") {
+        let dir = root.join(prefix);
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    push_tsconfigs_in(&entry.path(), out);
+                }
+            }
+        }
+    } else if !pattern.contains('*') {
+        push_tsconfigs_in(&root.join(pattern), out);
+    }
+}
+
+fn push_tsconfigs_in(dir: &Path, out: &mut Vec<PathBuf>) {
+    for name in &["tsconfig.json", "tsconfig.app.json"] {
+        let p = dir.join(name);
+        if p.exists() {
+            out.push(p);
+        }
+    }
+}
+
 fn build_aliases(opts: &CompilerOptions, _root: &Path) -> Vec<PathAlias> {
     let base = opts.base_url.as_deref().unwrap_or(".");
 
@@ -315,11 +427,21 @@ impl LanguageService for TypeScriptService {
 
 static TS_EXTENSIONS: &[&str] = &["ts", "tsx", "js", "jsx", "d.ts", "vue"];
 
+/// Public no-aliases entry point for callers outside this module (used by
+/// `context_bundle` to resolve `@`-aliased and workspace imports).
+pub(crate) fn resolve_import_path_public(
+    import_path: &str,
+    from_file: &Path,
+    root: &Path,
+) -> Option<PathBuf> {
+    resolve_import_path(import_path, from_file, root, &[])
+}
+
 fn resolve_import_path(
     import_path: &str,
     from_file: &Path,
     root: &Path,
-    aliases: &[PathAlias],
+    fallback_aliases: &[PathAlias],
 ) -> Option<PathBuf> {
     if import_path.starts_with('.') {
         // Relative import
@@ -328,12 +450,49 @@ fn resolve_import_path(
         return try_resolve_file(root, &candidate);
     }
 
-    // Try path aliases
-    for alias in aliases {
-        if import_path.starts_with(&alias.prefix) {
-            let rest = &import_path[alias.prefix.len()..];
+    // Walk up from `from_file` to find the closest tsconfig.json — its `paths`
+    // win over the root tsconfig's. This is what makes monorepo aliases like
+    // `@slave/contracts → ../slave-core-contracts/src/index.ts` actually resolve
+    // when `from_file` lives in `slave-core-be/`.
+    let local_aliases = nearest_tsconfig_aliases(from_file, root);
+
+    for set in [&local_aliases, fallback_aliases] {
+        for alias in set.iter() {
+            // Match the longest of {exact prefix, prefix-with-trailing-slash}.
+            // tsconfig "paths": { "@slave/contracts": ["..."], "@slave/contracts/*": ["..."] }
+            // both need to map; the prefix here may already end with "/".
+            let stripped_prefix = alias.prefix.trim_end_matches('/');
+            let matches_exact = import_path == stripped_prefix;
+            let matches_subpath = !alias.prefix.is_empty()
+                && (import_path.starts_with(&alias.prefix)
+                    || import_path.starts_with(&format!("{}/", stripped_prefix)));
+            if !matches_exact && !matches_subpath {
+                continue;
+            }
+
+            let rest: &str = if matches_exact {
+                ""
+            } else if let Some(r) = import_path.strip_prefix(&alias.prefix) {
+                r
+            } else {
+                import_path
+                    .strip_prefix(&format!("{}/", stripped_prefix))
+                    .unwrap_or("")
+            };
+
             for replacement in &alias.replacements {
-                let candidate = root.join(replacement).join(rest);
+                let candidate_str = if rest.is_empty() {
+                    replacement.clone()
+                } else if replacement.ends_with('/') || replacement.is_empty() {
+                    format!("{}{}", replacement, rest)
+                } else {
+                    format!("{}/{}", replacement, rest)
+                };
+                let candidate = if Path::new(&candidate_str).is_absolute() {
+                    PathBuf::from(&candidate_str)
+                } else {
+                    root.join(&candidate_str)
+                };
                 if let Some(resolved) = try_resolve_file(root, &candidate) {
                     return Some(resolved);
                 }
@@ -341,10 +500,16 @@ fn resolve_import_path(
         }
     }
 
+    // Workspace package.json — Bun/pnpm/yarn workspaces expose packages by their
+    // declared `name`. Look up the workspace whose package.json `name` matches
+    // the import's package portion and use its `exports` / `main` / `types`.
+    if let Some(resolved) = resolve_workspace_package(import_path, root) {
+        return Some(resolved);
+    }
+
     // node_modules (best-effort)
     let nm = root.join("node_modules").join(import_path);
     if nm.is_dir() {
-        // Try package.json main/types
         let pkg = nm.join("package.json");
         if pkg.exists() {
             if let Ok(raw) = std::fs::read_to_string(&pkg) {
@@ -366,6 +531,303 @@ fn resolve_import_path(
     }
 
     None
+}
+
+/// Find the closest tsconfig.json above `from_file` and load its aliases,
+/// resolving `extends` chains. Returns aliases anchored at the tsconfig's
+/// directory (so relative `paths` resolve correctly even outside the project root).
+fn nearest_tsconfig_aliases(from_file: &Path, root: &Path) -> Vec<PathAlias> {
+    let mut cur = from_file.parent();
+    while let Some(dir) = cur {
+        for name in &["tsconfig.json", "tsconfig.app.json", "jsconfig.json"] {
+            let p = dir.join(name);
+            if p.exists() {
+                let aliases = load_aliases_from_tsconfig(&p);
+                if !aliases.is_empty() {
+                    return aliases;
+                }
+            }
+        }
+        if dir == root {
+            break;
+        }
+        cur = dir.parent();
+    }
+    Vec::new()
+}
+
+/// Read a tsconfig and produce path aliases anchored at the tsconfig's directory.
+/// Follows `extends` chains (one level deep is enough for almost all projects).
+fn load_aliases_from_tsconfig(path: &Path) -> Vec<PathAlias> {
+    fn read(path: &Path) -> Option<TsConfigFull> {
+        let raw = std::fs::read_to_string(path).ok()?;
+        serde_json::from_str(&strip_json_comments(&raw)).ok()
+    }
+
+    let mut current = path.to_path_buf();
+    let mut merged_paths: HashMap<String, Vec<String>> = HashMap::new();
+    let mut merged_base: Option<String> = None;
+    let mut visited: std::collections::HashSet<PathBuf> =
+        std::collections::HashSet::new();
+
+    loop {
+        if !visited.insert(current.clone()) {
+            break;
+        }
+        let cfg = match read(&current) {
+            Some(c) => c,
+            None => break,
+        };
+
+        if merged_base.is_none() {
+            if let Some(base) = cfg.compiler_options.base_url {
+                merged_base = Some(base);
+            }
+        }
+        if let Some(paths) = cfg.compiler_options.paths {
+            for (k, v) in paths {
+                merged_paths.entry(k).or_insert(v);
+            }
+        }
+
+        match cfg.extends {
+            Some(ext) => {
+                let parent = current.parent().unwrap_or(Path::new("."));
+                current = if ext.starts_with('.') {
+                    parent.join(&ext)
+                } else {
+                    // bare specifier — best-effort: try as file under parent
+                    parent.join(&ext)
+                };
+                if !current.extension().map(|e| e == "json").unwrap_or(false) {
+                    current = current.with_extension("json");
+                }
+            }
+            None => break,
+        }
+    }
+
+    if merged_paths.is_empty() {
+        return Vec::new();
+    }
+
+    let cfg_dir = path.parent().unwrap_or(Path::new("."));
+    let base = merged_base.as_deref().unwrap_or(".");
+    let base_dir = cfg_dir.join(base);
+
+    let mut aliases = Vec::new();
+    for (pattern, targets) in merged_paths {
+        let prefix = pattern.trim_end_matches('*').to_string();
+        let replacements: Vec<String> = targets
+            .iter()
+            .map(|t| {
+                let stripped = t.trim_end_matches('*');
+                base_dir.join(stripped).to_string_lossy().to_string()
+            })
+            .collect();
+        aliases.push(PathAlias {
+            prefix,
+            replacements,
+        });
+    }
+    aliases.sort_by(|a, b| b.prefix.len().cmp(&a.prefix.len()));
+    aliases
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+struct TsConfigFull {
+    extends: Option<String>,
+    #[serde(alias = "compilerOptions")]
+    compiler_options: CompilerOptions,
+}
+
+/// If `import_path` matches the `name` field of a workspace package.json, return
+/// the file that workspace exports for it (handling subpath imports too).
+fn resolve_workspace_package(import_path: &str, root: &Path) -> Option<PathBuf> {
+    let workspaces = collect_workspace_dirs(root);
+    for ws in workspaces {
+        let pkg_path = ws.join("package.json");
+        let raw = std::fs::read_to_string(&pkg_path).ok()?;
+        let pkg: Value = serde_json::from_str(&raw).ok()?;
+        let name = pkg.get("name").and_then(|v| v.as_str())?;
+
+        let subpath = if import_path == name {
+            Some("")
+        } else if let Some(rest) = import_path.strip_prefix(&format!("{}/", name)) {
+            Some(rest)
+        } else {
+            None
+        };
+        let Some(subpath) = subpath else { continue };
+
+        // 1. exports field — handle the common shapes only ("." / "./*" / map)
+        if let Some(exports) = pkg.get("exports") {
+            if let Some(p) = resolve_pkg_exports(exports, subpath, &ws) {
+                return Some(p);
+            }
+        }
+
+        // 2. Sub-path lookup: try to resolve `<ws>/src/<subpath>` and `<ws>/<subpath>`
+        if !subpath.is_empty() {
+            for base in &["src", ""] {
+                let candidate = if base.is_empty() {
+                    ws.join(subpath)
+                } else {
+                    ws.join(base).join(subpath)
+                };
+                if let Some(r) = try_resolve_file(root, &candidate) {
+                    return Some(r);
+                }
+            }
+        }
+
+        // 3. main / module / types
+        for key in ["types", "typings", "module", "main"] {
+            if let Some(entry) = pkg.get(key).and_then(|v| v.as_str()) {
+                let candidate = ws.join(entry);
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+                if let Some(r) = try_resolve_file(root, &candidate) {
+                    return Some(r);
+                }
+            }
+        }
+
+        // 4. <ws>/src/index.ts fallback
+        if let Some(r) = try_resolve_file(root, &ws.join("src").join("index")) {
+            return Some(r);
+        }
+        if let Some(r) = try_resolve_file(root, &ws.join("index")) {
+            return Some(r);
+        }
+    }
+    None
+}
+
+fn resolve_pkg_exports(exports: &Value, subpath: &str, ws: &Path) -> Option<PathBuf> {
+    // String shape: "exports": "./index.ts"
+    if let Some(s) = exports.as_str() {
+        if subpath.is_empty() {
+            return Some(ws.join(s.trim_start_matches("./")));
+        }
+        return None;
+    }
+
+    // Object shape: { ".": ..., "./auth": ..., "./*": ... }
+    let obj = exports.as_object()?;
+    let key = if subpath.is_empty() {
+        ".".to_string()
+    } else {
+        format!("./{}", subpath)
+    };
+
+    let entry = obj.get(&key).or_else(|| {
+        // Try wildcard match — find a key like "./*" or "./feat/*"
+        obj.iter().find_map(|(k, v)| {
+            if let Some(prefix) = k.strip_suffix('*') {
+                let prefix = prefix.trim_start_matches("./");
+                if subpath.starts_with(prefix) {
+                    let rest = &subpath[prefix.len()..];
+                    return Some((v, rest));
+                }
+            }
+            None
+        }).map(|(v, _)| v)
+    });
+
+    let entry = entry?;
+    let target_str = match entry {
+        Value::String(s) => s.clone(),
+        Value::Object(o) => o
+            .get("import")
+            .or_else(|| o.get("require"))
+            .or_else(|| o.get("default"))
+            .and_then(|v| v.as_str())
+            .map(String::from)?,
+        _ => return None,
+    };
+
+    Some(ws.join(target_str.trim_start_matches("./")))
+}
+
+fn collect_workspace_dirs(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let pkg_path = root.join("package.json");
+    if let Ok(raw) = std::fs::read_to_string(&pkg_path) {
+        if let Ok(pkg) = serde_json::from_str::<Value>(&raw) {
+            let patterns = match pkg.get("workspaces") {
+                Some(Value::Array(arr)) => arr
+                    .iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect::<Vec<_>>(),
+                Some(Value::Object(obj)) => obj
+                    .get("packages")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            for pat in patterns {
+                expand_workspace_dirs(root, &pat, &mut out);
+            }
+        }
+    }
+
+    // pnpm-workspace.yaml fallback
+    let pnpm = root.join("pnpm-workspace.yaml");
+    if let Ok(raw) = std::fs::read_to_string(&pnpm) {
+        for line in raw.lines() {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed
+                .strip_prefix("- ")
+                .or_else(|| trimmed.strip_prefix("- \""))
+                .or_else(|| trimmed.strip_prefix("- '"))
+            {
+                let pat = rest.trim_end_matches(['"', '\'']).to_string();
+                if !pat.is_empty() {
+                    expand_workspace_dirs(root, &pat, &mut out);
+                }
+            }
+        }
+    }
+
+    // Sibling repos one level above root — covers slave-ai's "../slave-core-contracts"
+    // monorepo-on-disk shape where each repo is a peer directory under a parent.
+    if let Some(parent) = root.parent() {
+        if let Ok(entries) = std::fs::read_dir(parent) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_dir() && p != root && p.join("package.json").is_file() {
+                    out.push(p);
+                }
+            }
+        }
+    }
+
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn expand_workspace_dirs(root: &Path, pattern: &str, out: &mut Vec<PathBuf>) {
+    if let Some(prefix) = pattern.strip_suffix("/*") {
+        let dir = root.join(prefix);
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    out.push(entry.path());
+                }
+            }
+        }
+    } else if !pattern.contains('*') {
+        out.push(root.join(pattern));
+    }
 }
 
 fn try_resolve_file(_root: &Path, candidate: &Path) -> Option<PathBuf> {
@@ -845,19 +1307,41 @@ impl TypeScriptService {
 
                 out.push_str(&format!("**Location:** `{}:{}`\n", path, sym.line_start));
 
-                if let Some(ref sig) = sym.signature {
-                    out.push_str(&format!("```typescript\n{}\n```\n\n", sig));
-                } else {
-                    // Try reading from file
+                // Stored signatures pre-fix were sometimes truncated to the
+                // first line ("function foo(" with no params/return type).
+                // If the cached value looks incomplete, re-parse the file to
+                // recover the full signature so the user isn't stuck with a
+                // partial answer until a force_reindex.
+                let stored_looks_truncated = sym
+                    .signature
+                    .as_deref()
+                    .map(|s| {
+                        let trimmed = s.trim_end();
+                        trimmed.ends_with('(')
+                            || trimmed.ends_with(',')
+                            || (!trimmed.contains(')')
+                                && (trimmed.starts_with("function ")
+                                    || trimmed.starts_with("async function ")
+                                    || trimmed.starts_with("export function ")
+                                    || trimmed.starts_with("export async function ")))
+                    })
+                    .unwrap_or(true);
+
+                let final_sig: Option<String> = if stored_looks_truncated {
                     let abs = root.join(&path);
-                    if abs.exists() {
+                    let from_file = if abs.exists() {
                         let code = tokio::fs::read_to_string(&abs).await.unwrap_or_default();
-                        if let Some((_kind, sig, _exported)) =
-                            find_function_signature(&code, function_name)
-                        {
-                            out.push_str(&format!("```typescript\n{}\n```\n\n", sig));
-                        }
-                    }
+                        find_function_signature(&code, function_name).map(|(_, s, _)| s)
+                    } else {
+                        None
+                    };
+                    from_file.or_else(|| sym.signature.clone())
+                } else {
+                    sym.signature.clone()
+                };
+
+                if let Some(sig) = final_sig {
+                    out.push_str(&format!("```typescript\n{}\n```\n\n", sig));
                 }
             }
         }
@@ -977,74 +1461,143 @@ impl TypeScriptService {
         Ok(out)
     }
 
-    /// `ts_check_file` — run tsc --noEmit
+    /// `ts_check_file` — run tsc --noEmit against the nearest tsconfig.json.
+    ///
+    /// Previously this just ran `tsc` in `root` with no `-p` arg, so on monorepos
+    /// without a root tsconfig (slave-ai, most pnpm/bun workspaces) tsc had no
+    /// inputs and printed its `--help` banner, which we then returned as the
+    /// "diagnostics". Now we walk up from the requested file to find the closest
+    /// tsconfig.json, or iterate workspace tsconfigs when no `file` is given.
     async fn tool_check_file(&self, args: Value, root: &Path) -> Result<String> {
         let file_filter = args.get("file").and_then(|v| v.as_str());
+        let manifest_arg = args
+            .get("manifest_path")
+            .or_else(|| args.get("tsconfig"))
+            .and_then(|v| v.as_str());
 
-        // Determine tsc command: npx tsc or ./node_modules/.bin/tsc
-        let tsc_path = root.join("node_modules/.bin/tsc");
-        let (cmd_name, cmd_args) = if tsc_path.exists() {
-            (
-                tsc_path.to_string_lossy().to_string(),
-                vec!["--noEmit", "--pretty", "false"],
-            )
+        let tsconfigs: Vec<PathBuf> = if let Some(p) = manifest_arg {
+            vec![root.join(p)]
+        } else if let Some(f) = file_filter {
+            match find_tsconfig_for(root, f) {
+                Some(p) => vec![p],
+                None => {
+                    return Ok(format!(
+                        "# TypeScript Check\n\nNo tsconfig.json found walking up from `{}`. \
+                         Pass `manifest_path` or run from a directory containing tsconfig.json.\n",
+                        f
+                    ));
+                }
+            }
         } else {
-            (
-                "npx".to_string(),
-                vec!["tsc", "--noEmit", "--pretty", "false"],
-            )
+            discover_workspace_tsconfigs(root)
         };
 
-        let output = tokio::process::Command::new(&cmd_name)
-            .args(&cmd_args)
-            .current_dir(root)
-            .output()
-            .await?;
+        if tsconfigs.is_empty() {
+            return Ok(
+                "# TypeScript Check\n\nNo tsconfig.json discovered in this project.\n".to_string(),
+            );
+        }
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let combined = format!("{}\n{}", stdout, stderr);
+        let tsc_path = root.join("node_modules/.bin/tsc");
+        let tsc_exists = tsc_path.exists();
 
-        // Parse TSC output: src/file.ts(10,5): error TS2322: ...
-        let mut diagnostics: Vec<(String, u32, String, String, String)> = Vec::new();
-        for line in combined.lines() {
-            if let Some(cap) = TSC_DIAGNOSTIC_RE.captures(line) {
-                let file = cap[1].to_string();
-                let line_num: u32 = cap[2].parse().unwrap_or(0);
-                let level = cap[4].to_string();
-                let code = cap[5].to_string();
-                let msg = cap[6].to_string();
+        let mut all_diagnostics: Vec<(String, u32, String, String, String)> = Vec::new();
+        let mut ran_any = false;
+        let mut errors_unparsed: Vec<(PathBuf, String)> = Vec::new();
 
-                if let Some(filter) = file_filter {
-                    if !file.contains(filter) && !file.ends_with(filter) {
-                        continue;
-                    }
+        for tsconfig in &tsconfigs {
+            let tsconfig_arg = tsconfig.to_string_lossy().to_string();
+            let (cmd_name, cmd_args): (String, Vec<&str>) = if tsc_exists {
+                (
+                    tsc_path.to_string_lossy().to_string(),
+                    vec!["--noEmit", "--pretty", "false", "-p", &tsconfig_arg],
+                )
+            } else {
+                (
+                    "npx".to_string(),
+                    vec![
+                        "--no-install",
+                        "tsc",
+                        "--noEmit",
+                        "--pretty",
+                        "false",
+                        "-p",
+                        &tsconfig_arg,
+                    ],
+                )
+            };
+
+            let output = match tokio::process::Command::new(&cmd_name)
+                .args(&cmd_args)
+                .current_dir(root)
+                .output()
+                .await
+            {
+                Ok(o) => o,
+                Err(e) => {
+                    errors_unparsed.push((tsconfig.clone(), format!("spawn failed: {}", e)));
+                    continue;
                 }
+            };
 
-                diagnostics.push((file, line_num, level, code, msg));
+            ran_any = true;
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let combined = format!("{}\n{}", stdout, stderr);
+
+            let mut parsed_any = false;
+            for line in combined.lines() {
+                if let Some(cap) = TSC_DIAGNOSTIC_RE.captures(line) {
+                    parsed_any = true;
+                    let file = cap[1].to_string();
+                    let line_num: u32 = cap[2].parse().unwrap_or(0);
+                    let level = cap[4].to_string();
+                    let code = cap[5].to_string();
+                    let msg = cap[6].to_string();
+
+                    if let Some(filter) = file_filter {
+                        if !file.contains(filter) && !file.ends_with(filter) {
+                            continue;
+                        }
+                    }
+
+                    all_diagnostics.push((file, line_num, level, code, msg));
+                }
+            }
+
+            if !output.status.success() && !parsed_any {
+                let truncated: String = combined.chars().take(2000).collect();
+                errors_unparsed.push((tsconfig.clone(), truncated.trim().to_string()));
             }
         }
 
         let mut out = String::from("# TypeScript Check\n\n");
+        out.push_str(&format!(
+            "Checked {} tsconfig(s): {}\n\n",
+            tsconfigs.len(),
+            tsconfigs
+                .iter()
+                .map(|p| p.strip_prefix(root).unwrap_or(p).display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
 
-        if diagnostics.is_empty() {
-            if output.status.success() {
+        if all_diagnostics.is_empty() && errors_unparsed.is_empty() {
+            if ran_any {
                 out.push_str("No type errors found.\n");
             } else {
-                // tsc failed but we couldn't parse output
-                let truncated: String = combined.chars().take(2000).collect();
-                out.push_str("tsc returned errors but output couldn't be parsed:\n\n");
-                out.push_str(&format!("```\n{}\n```\n", truncated.trim()));
+                out.push_str("tsc could not be invoked — no diagnostics produced.\n");
             }
         } else {
-            let errors = diagnostics.iter().filter(|d| d.2 == "error").count();
-            let warnings = diagnostics.iter().filter(|d| d.2 == "warning").count();
+            let errors = all_diagnostics.iter().filter(|d| d.2 == "error").count();
+            let warnings = all_diagnostics.iter().filter(|d| d.2 == "warning").count();
             out.push_str(&format!(
                 "Found **{}** error(s), **{}** warning(s)\n\n",
                 errors, warnings
             ));
 
-            for (file, line, level, code, msg) in &diagnostics {
+            for (file, line, level, code, msg) in &all_diagnostics {
                 out.push_str(&format!(
                     "- **[{}]** `{}:{}` ({}): {}\n",
                     level.to_uppercase(),
@@ -1052,6 +1605,14 @@ impl TypeScriptService {
                     line,
                     code,
                     msg
+                ));
+            }
+
+            for (cfg, blob) in &errors_unparsed {
+                out.push_str(&format!(
+                    "\n## tsc errors for `{}` (unparseable)\n\n```\n{}\n```\n",
+                    cfg.display(),
+                    blob
                 ));
             }
         }

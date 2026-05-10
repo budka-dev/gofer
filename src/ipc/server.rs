@@ -584,7 +584,7 @@ async fn handle_reindex(id: Value, params: &Value, state: &Arc<DaemonState>) -> 
                 let indexer = crate::indexer::service::IndexerService::new(
                     project.sqlite.clone(),
                     project.lance.clone(),
-                    state.embedder.clone(),
+                    project.embedder.clone(),
                     1,
                 );
                 match indexer.index_file(std::path::Path::new(file_path)).await {
@@ -665,7 +665,7 @@ async fn handle_tools_call(
     let ctx = tools::ToolContext {
         sqlite: Arc::new(project.sqlite.clone()),
         lance: Arc::clone(&project.lance),
-        embedder: Arc::clone(&state.embedder),
+        embedder: Arc::clone(&project.embedder),
         root_path: Arc::new(project.path.clone()),
         cache: Arc::clone(&project.cache),
         embedding_circuit: Arc::clone(&state.embedding_circuit),
@@ -804,7 +804,7 @@ async fn handle_resources_read(
     let ctx = tools::ToolContext {
         sqlite: Arc::new(project.sqlite.clone()),
         lance: Arc::clone(&project.lance),
-        embedder: Arc::clone(&state.embedder),
+        embedder: Arc::clone(&project.embedder),
         root_path: Arc::new(project.path.clone()),
         cache: Arc::clone(&project.cache),
         embedding_circuit: Arc::clone(&state.embedding_circuit), // Feature 016
@@ -960,7 +960,7 @@ async fn handle_prompts_get(
     let ctx = tools::ToolContext {
         sqlite: Arc::new(project.sqlite.clone()),
         lance: Arc::clone(&project.lance),
-        embedder: Arc::clone(&state.embedder),
+        embedder: Arc::clone(&project.embedder),
         root_path: Arc::new(project.path.clone()),
         cache: Arc::clone(&project.cache),
         embedding_circuit: Arc::clone(&state.embedding_circuit), // Feature 016
@@ -1038,17 +1038,14 @@ async fn prompt_explain_module(
         tools::dispatch("skeleton", json!({"file": file}), ctx).await?;
     let symbols: serde_json::Value =
         tools::dispatch("get_symbols", json!({"file": file}), ctx).await?;
-    let summary: serde_json::Value =
-        tools::dispatch("get_summary", json!({"file": file}), ctx).await?;
 
     Ok(vec![json!({
         "role": "user",
         "content": {
             "type": "text",
             "text": format!(
-                "Explain the module `{}`.\n\n## Summary\n```json\n{}\n```\n\n## Skeleton\n```json\n{}\n```\n\n## Symbols\n```json\n{}\n```\n\nProvide:\n1. Overall purpose and responsibility\n2. Key data structures and their roles\n3. Main functions/methods and their flow\n4. Dependencies and how they're used\n5. How this module fits into the larger architecture",
+                "Explain the module `{}`.\n\n## Skeleton\n```json\n{}\n```\n\n## Symbols\n```json\n{}\n```\n\nProvide:\n1. Overall purpose and responsibility\n2. Key data structures and their roles\n3. Main functions/methods and their flow\n4. Dependencies and how they're used\n5. How this module fits into the larger architecture",
                 file,
-                serde_json::to_string_pretty(&summary)?,
                 serde_json::to_string_pretty(&skeleton)?,
                 serde_json::to_string_pretty(&symbols)?
             )

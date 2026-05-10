@@ -13,9 +13,7 @@ use tokio_util::sync::CancellationToken;
 use super::registry::{ProjectRecord, RegistryDb};
 use crate::cache::CacheManager;
 use crate::error_recovery::CircuitBreaker; // Feature 016
-use crate::indexer::{
-    load_config, start_watcher, EmbedderPool, GoferConfig, IndexTask, IndexerService,
-};
+use crate::indexer::{load_config, start_watcher, EmbedderPool, IndexTask, IndexerService};
 use crate::languages::LanguageService;
 use crate::resource_limits::ResourceLimits; // Feature 015
 use crate::storage::{LanceStorage, SqliteStorage};
@@ -26,8 +24,6 @@ pub struct DaemonState {
     pub gofer_home: PathBuf,
     /// Project registry
     pub registry: RegistryDb,
-    /// Shared embedding pool (N instances, Arc-shared across all projects)
-    pub embedder: Arc<EmbedderPool>,
     /// Active projects keyed by project UUID
     pub projects: RwLock<HashMap<String, Arc<ProjectState>>>,
     /// Daemon start time
@@ -51,7 +47,8 @@ pub struct DaemonState {
     /// Language manager for tracking and resolving languages
     pub lang_manager: Arc<crate::indexer::parser::lang_manager::LanguageManager>,
     /// Security approvals for sandbox code execution (id -> (command, oneshot_sender))
-    pub pending_confirmations: Arc<dashmap::DashMap<String, (String, tokio::sync::oneshot::Sender<bool>)>>,
+    pub pending_confirmations:
+        Arc<dashmap::DashMap<String, (String, tokio::sync::oneshot::Sender<bool>)>>,
 }
 
 /// Lock-free runtime metrics for the daemon process.
@@ -221,7 +218,8 @@ pub struct ProjectState {
     pub name: String,
     pub sqlite: SqliteStorage,
     pub lance: Arc<LanceStorage>,
-    pub task_tx: mpsc::Sender<IndexTask>,
+    pub embedder: Arc<EmbedderPool>,
+    pub task_tx: mpsc::Sender<Vec<IndexTask>>,
     pub language_services: Arc<Vec<Box<dyn LanguageService>>>,
     /// Whether a file watcher is active
     pub watcher_active: Mutex<bool>,
@@ -230,7 +228,8 @@ pub struct ProjectState {
     /// Cache manager for this project
     pub cache: Arc<CacheManager>,
     /// active LSP clients for this project (lazy-loaded per language)
-    pub lsp_clients: Arc<RwLock<HashMap<String, Arc<crate::languages::generic_lsp::GenericLspClient>>>>,
+    pub lsp_clients:
+        Arc<RwLock<HashMap<String, Arc<crate::languages::generic_lsp::GenericLspClient>>>>,
 }
 
 impl DaemonState {
@@ -241,19 +240,6 @@ impl DaemonState {
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("Invalid registry path: non-UTF8 characters"))?;
         let registry = RegistryDb::new(registry_path_str).await?;
-
-        // Try to load global config from ~/.gofer/config.toml (not .gofer/config.toml)
-        let global_config_path = gofer_home.join("config.toml");
-        let config = if global_config_path.exists() {
-            tracing::info!("Loading global config from {:?}", global_config_path);
-            load_config(&gofer_home)
-        } else {
-            tracing::info!("No global config found, using defaults");
-            GoferConfig::default()
-        };
-
-        tracing::info!("Loading embedding pool...");
-        let embedder = EmbedderPool::with_config(1, &config.embedding)?; // Start with 1 instance, scale up for indexing
 
         let (notify_tx, _) = broadcast::channel::<String>(64);
 
@@ -275,7 +261,6 @@ impl DaemonState {
         Ok(Self {
             gofer_home: gofer_home.clone(),
             registry,
-            embedder: Arc::new(embedder),
             projects: RwLock::new(HashMap::new()),
             started_at: Instant::now(),
             sync_progress: Arc::new(SyncProgress::new()),
@@ -286,7 +271,15 @@ impl DaemonState {
             resource_limits: Arc::new(ResourceLimits::default()), // Feature 015
             embedding_circuit,                                    // Feature 016
             vector_circuit,                                       // Feature 016
-            lang_manager: Arc::new(crate::indexer::parser::lang_manager::LanguageManager::new(Some(gofer_home.clone().join("langs")), Some(gofer_home.clone().join("tools"))).unwrap_or_else(|_| crate::indexer::parser::lang_manager::LanguageManager::new(None, None).unwrap())),
+            lang_manager: Arc::new(
+                crate::indexer::parser::lang_manager::LanguageManager::new(
+                    Some(gofer_home.clone().join("langs")),
+                    Some(gofer_home.clone().join("tools")),
+                )
+                .unwrap_or_else(|_| {
+                    crate::indexer::parser::lang_manager::LanguageManager::new(None, None).unwrap()
+                }),
+            ),
             pending_confirmations: Arc::new(dashmap::DashMap::new()),
         })
     }
@@ -296,8 +289,9 @@ impl DaemonState {
     pub async fn request_confirmation(&self, command: &str) -> bool {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let id = uuid::Uuid::new_v4().to_string();
-        self.pending_confirmations.insert(id.clone(), (command.to_string(), tx));
-        
+        self.pending_confirmations
+            .insert(id.clone(), (command.to_string(), tx));
+
         match tokio::time::timeout(std::time::Duration::from_secs(3600), rx).await {
             Ok(Ok(approved)) => approved,
             _ => {
@@ -345,6 +339,10 @@ impl DaemonState {
         let gofer_dir = root_path.join(".gofer");
         let config = load_config(&gofer_dir);
         let workers = config.indexer.parallel_workers.unwrap_or(4);
+        let embedder = Arc::new(EmbedderPool::with_config(
+            config.embedding.pool_size,
+            &config.embedding,
+        )?);
 
         let db_path = index_dir.join("graph.db");
         let lance_path = index_dir.join("lancedb");
@@ -367,7 +365,7 @@ impl DaemonState {
 
         // C3: Invalidate chunk embedding cache if the model changed since last index
         let cache_version_key = "embedding_cache_version";
-        let current_version = self.embedder.cache_version_key();
+        let current_version = embedder.cache_version_key();
         match sqlite.get_index_meta(cache_version_key).await? {
             Some(stored) if stored == current_version => {}
             Some(old_version) => {
@@ -377,9 +375,15 @@ impl DaemonState {
                     current_version
                 );
                 sqlite.clear_chunk_cache().await?;
+                sqlite.reset_all_indexing_status().await?;
                 sqlite
                     .set_index_meta(cache_version_key, &current_version)
                     .await?;
+                    
+                if lance_path.exists() {
+                    tracing::info!("Dropping LanceDB to recreate with new dimensions");
+                    tokio::fs::remove_dir_all(&lance_path).await.ok();
+                }
             }
             None => {
                 sqlite
@@ -394,7 +398,7 @@ impl DaemonState {
                 lance_path
             )
         })?;
-        let lance_storage = LanceStorage::new(lance_path_str, self.embedder.dimension()).await?;
+        let lance_storage = LanceStorage::new(lance_path_str, embedder.dimension()).await?;
 
         // Run health check on LanceDB
         if let Err(e) = lance_storage.health_check().await {
@@ -408,7 +412,7 @@ impl DaemonState {
 
         let lance = Arc::new(lance_storage);
 
-        let (task_tx, task_rx) = mpsc::channel::<IndexTask>(100);
+        let (task_tx, task_rx) = mpsc::channel::<Vec<IndexTask>>(100);
 
         let language_services = Arc::new(init_language_services(&sqlite, &root_path));
 
@@ -423,6 +427,7 @@ impl DaemonState {
             name: record.name.clone(),
             sqlite: sqlite.clone(),
             lance: lance.clone(),
+            embedder: embedder.clone(),
             task_tx,
             language_services,
             watcher_active: Mutex::new(false),
@@ -435,7 +440,7 @@ impl DaemonState {
         // Feature 012: Pass cache for invalidation on file changes
         // Use configured parallel workers
         let indexer =
-            IndexerService::new(sqlite, lance, self.embedder.clone(), workers).with_cache(cache);
+            IndexerService::new(sqlite, lance, embedder.clone(), workers).with_cache(cache);
 
         tokio::spawn(async move {
             indexer.run(task_rx).await;
@@ -474,6 +479,27 @@ impl DaemonState {
 
         let project = self.get_or_load_project(project_path).await?;
 
+        // Check if we can skip full sync because it's already running and being watched
+        let mut should_start_watcher = false;
+        if watch {
+            let mut watcher_active = project.watcher_active.lock().await;
+            if *watcher_active {
+                tracing::info!(
+                    "Project '{}' is already actively watched. Skipping redundant full_sync.",
+                    record.name
+                );
+                return Ok(format!(
+                    "Project '{}' activated (already watching)",
+                    record.name
+                ));
+            } else {
+                // Mark as active immediately to prevent concurrent activate_project calls
+                // from spawning redundant syncs and watchers.
+                *watcher_active = true;
+                should_start_watcher = true;
+            }
+        }
+
         // Run full sync
         let index_dir = self.gofer_home.join("indices").join(&record.id);
 
@@ -499,7 +525,7 @@ impl DaemonState {
         let sync_indexer = IndexerService::new(
             project.sqlite.clone(),
             project.lance.clone(),
-            self.embedder.clone(),
+            project.embedder.clone(),
             workers,
         );
 
@@ -540,19 +566,15 @@ impl DaemonState {
         }
 
         // Start watcher if requested
-        if watch {
-            let mut watcher_active = project.watcher_active.lock().await;
-            if !*watcher_active {
-                let watcher_root = root.clone();
-                let watcher_tx = project.task_tx.clone();
-                let watcher_ignores = ignore_patterns;
-                let watcher_cancel = project.cancel.clone();
-                tokio::spawn(async move {
-                    start_watcher(watcher_root, watcher_tx, watcher_ignores, watcher_cancel).await;
-                });
-                *watcher_active = true;
-                tracing::info!("Watcher started for {}", project_path);
-            }
+        if should_start_watcher {
+            let watcher_root = root.clone();
+            let watcher_tx = project.task_tx.clone();
+            let watcher_ignores = ignore_patterns;
+            let watcher_cancel = project.cancel.clone();
+            tokio::spawn(async move {
+                start_watcher(watcher_root, watcher_tx, watcher_ignores, watcher_cancel).await;
+            });
+            tracing::info!("Watcher started for {}", project_path);
         }
 
         Ok(format!(
@@ -592,23 +614,26 @@ impl DaemonState {
         file_path: &str,
     ) -> Result<Option<Arc<crate::languages::generic_lsp::GenericLspClient>>> {
         let project = self.get_or_load_project(project_path).await?;
-        let ext = std::path::Path::new(file_path).extension().and_then(|e| e.to_str()).unwrap_or("");
-        
+        let ext = std::path::Path::new(file_path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+
         // 1. Resolve Language via lang_manager
         let lang_name = match self.lang_manager.get_language_by_ext(ext) {
             Some(l) => l,
-            None => return Ok(None) // No language support
+            None => return Ok(None), // No language support
         };
-        
+
         // 2. Load manifest to find LSP details
-        let loaded_lang = match self.lang_manager.loaded_langs.get(&lang_name) {
+        let loaded_lang = match self.lang_manager.get_language(&lang_name) {
             Some(l) => l,
-            None => return Ok(None)
+            None => return Ok(None),
         };
-        
-        let lsp_config = match &loaded_lang.value().manifest.lsp {
+
+        let lsp_config = match &loaded_lang.manifest.lsp {
             Some(config) => config.clone(),
-            None => return Ok(None) // No LSP configured for this language
+            None => return Ok(None), // No LSP configured for this language
         };
 
         let lang_id = lsp_config.name.clone().unwrap_or_else(|| lang_name.clone());
@@ -642,14 +667,26 @@ impl DaemonState {
             if let Some(tool_manifest) = self.lang_manager.get_tool(t) {
                 if let Some(lsp_tool_config) = &tool_manifest.lsp {
                     let mut cmd = lsp_tool_config.command.clone();
-                    
+
                     if let Some(install) = &tool_manifest.tool.install {
                         let exe_name = &install.binary.executable_name;
-                        let local_exe = self.lang_manager.tools_dir.join(t).join("bin").join(exe_name);
-                        
+                        let local_exe = self
+                            .lang_manager
+                            .tools_dir
+                            .join(t)
+                            .join("bin")
+                            .join(exe_name);
+
                         if !local_exe.exists() {
-                            tracing::info!("Tool executable {} not found locally. Attempting to download...", exe_name);
-                            if let Ok(path) = self.lang_manager.download_and_extract_binary(t, &tool_manifest).await {
+                            tracing::info!(
+                                "Tool executable {} not found locally. Attempting to download...",
+                                exe_name
+                            );
+                            if let Ok(path) = self
+                                .lang_manager
+                                .download_and_extract_binary(t, &tool_manifest)
+                                .await
+                            {
                                 cmd = path.to_string_lossy().to_string();
                             }
                         } else {
@@ -672,18 +709,35 @@ impl DaemonState {
         }
 
         // Start new instance
-        let shell_args = shell_words::split(&command_str).unwrap_or_else(|_| vec![command_str.clone()]);
+        let shell_args =
+            shell_words::split(&command_str).unwrap_or_else(|_| vec![command_str.clone()]);
         let cmd = shell_args[0].clone();
         let mut args: Vec<String> = shell_args.into_iter().skip(1).collect();
         args.extend(tool_args);
-        
+
+        // Probe the LSP binary up-front. Spawning a server only to have the
+        // process fail to exec leaves a confusing "Failed to spawn LSP server"
+        // error for the user; checking PATH first lets us return an actionable
+        // install hint instead.
+        if !lsp_binary_available(&cmd).await {
+            let hint = lsp_install_hint(&cmd, &lang_id);
+            return Err(anyhow::anyhow!(
+                "LSP server `{}` not found in PATH (needed for {} tools). {}",
+                cmd,
+                lang_id,
+                hint
+            ));
+        }
+
         let root_path = project.path.clone();
         let mut actual_root = root_path.clone();
-        if let Ok(file_path_buf) = crate::daemon::handlers::common::resolve_path_buf(&root_path, file_path) {
+        if let Ok(file_path_buf) =
+            crate::daemon::handlers::common::resolve_path_buf(&root_path, file_path)
+        {
             actual_root = crate::daemon::handlers::common::find_project_root(
                 &file_path_buf,
-                &loaded_lang.value().manifest.language.root_markers,
-                &root_path
+                &loaded_lang.manifest.language.root_markers,
+                &root_path,
             );
         }
 
@@ -701,6 +755,56 @@ impl DaemonState {
         clients_guard.insert(lang_id.clone(), client.clone());
 
         Ok(Some(client))
+    }
+}
+
+/// Check whether `cmd` resolves to an executable file. Handles both absolute
+/// paths (from manifest `command`) and bare binary names (resolved via PATH).
+async fn lsp_binary_available(cmd: &str) -> bool {
+    if cmd.contains('/') {
+        return tokio::fs::metadata(cmd)
+            .await
+            .map(|m| m.is_file())
+            .unwrap_or(false);
+    }
+    let Some(path_var) = std::env::var_os("PATH") else {
+        return false;
+    };
+    for dir in std::env::split_paths(&path_var) {
+        if dir.join(cmd).is_file() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Map known LSP binaries to their install commands. Falls back to a generic
+/// "install <cmd>" message for unknown servers.
+fn lsp_install_hint(cmd: &str, lang_id: &str) -> String {
+    let hint = match cmd {
+        "typescript-language-server" => Some(
+            "Install: `npm i -g typescript-language-server typescript` or `bun add -g typescript-language-server typescript`."
+        ),
+        "rust-analyzer" => Some(
+            "Install: `rustup component add rust-analyzer` or download from https://rust-analyzer.github.io"
+        ),
+        "pyright" | "pyright-langserver" => Some(
+            "Install: `npm i -g pyright`."
+        ),
+        "gopls" => Some(
+            "Install: `go install golang.org/x/tools/gopls@latest`."
+        ),
+        "vscode-eslint-language-server" => Some(
+            "Install: `npm i -g vscode-langservers-extracted`."
+        ),
+        "vue-language-server" | "volar" => Some(
+            "Install: `npm i -g @vue/language-server`."
+        ),
+        _ => None,
+    };
+    match hint {
+        Some(h) => h.to_string(),
+        None => format!("Install the {} language server and ensure it's on PATH.", lang_id),
     }
 }
 

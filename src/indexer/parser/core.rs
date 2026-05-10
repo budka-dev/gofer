@@ -44,8 +44,7 @@ impl SupportedLanguage {
     pub fn from_extension(ext: &str) -> Option<Self> {
         let name = match ext {
             "rs" => Self::RUST,
-            "ts" | "tsx" => Self::TYPESCRIPT,
-            "js" | "jsx" => Self::JAVASCRIPT,
+            "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => Self::TYPESCRIPT,
             "vue" => Self::VUE,
             "py" => Self::PYTHON,
             "go" => Self::GO,
@@ -211,8 +210,31 @@ impl CodeParser {
                         };
                         line_start = node.start_position().row as u32;
                         line_end = node.end_position().row as u32;
-                        let first_line = text.lines().next().unwrap_or("");
-                        signature = Some(first_line.to_string());
+                        // Capture the full signature (everything up to the body `{`)
+                        // rather than just the first line. Multi-line signatures
+                        // like `function foo(\n  a: A,\n  b: B\n): R {` used to
+                        // store only `function foo(`, which surfaced as a
+                        // truncated signature in `ts_get_signature`.
+                        let body_node = node.child_by_field_name("body");
+                        let sig_text = if let Some(body) = body_node {
+                            let sig_end = body.start_byte().min(content.len());
+                            let sig_start = node.start_byte();
+                            if sig_end > sig_start {
+                                &content[sig_start..sig_end]
+                            } else {
+                                text
+                            }
+                        } else {
+                            text
+                        };
+                        // Collapse internal whitespace runs to single spaces so
+                        // the signature stays one line in tool output without
+                        // losing information.
+                        let collapsed: String = sig_text
+                            .split_whitespace()
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        signature = Some(collapsed);
                     }
                     _ => {}
                 }
@@ -421,18 +443,31 @@ impl CodeParser {
     }
 
     fn collect_ts_imports(root: Node, code: &str) -> Vec<ImportInfo> {
+        // Walk the AST and extract the actual module specifier (the string
+        // literal after `from`) plus the imported items. The previous version
+        // dumped the entire `import { foo } from './bar';` statement into
+        // `path` and hard-coded `is_relative: false`, which is why
+        // context_bundle's dependency resolver never matched anything for TS.
         let mut imports = Vec::new();
         let mut cursor = root.walk();
         for node in root.children(&mut cursor) {
-            if node.kind() == "import_statement" {
-                let text = &code[node.byte_range()];
-                imports.push(ImportInfo {
-                    path: text.to_string(),
-                    items: Vec::new(),
-                    is_relative: false,
-                    line: node.start_position().row as u32,
-                });
+            if node.kind() != "import_statement" {
+                continue;
             }
+            let source_node = node.child_by_field_name("source");
+            let source = match source_node {
+                Some(n) => unquote_string_literal(&code[n.byte_range()]),
+                None => continue,
+            };
+            let line = node.start_position().row as u32;
+            let is_relative = source.starts_with('.') || source.starts_with('/');
+            let items = extract_ts_imported_items(node, code);
+            imports.push(ImportInfo {
+                path: source,
+                items,
+                is_relative,
+                line,
+            });
         }
         imports
     }
@@ -494,6 +529,67 @@ pub fn smart_chunk_file(
 ) -> Result<Vec<CodeChunk>> {
     let mut parser = CodeParser::new();
     parser.parse_chunks(content, file_path, language)
+}
+
+/// Strip surrounding `'`, `"`, or backticks from a tree-sitter string-literal
+/// node's text. tree-sitter returns the lexeme including quotes.
+fn unquote_string_literal(s: &str) -> String {
+    let trimmed = s.trim();
+    if trimmed.len() >= 2 {
+        let bytes = trimmed.as_bytes();
+        let first = bytes[0];
+        let last = bytes[trimmed.len() - 1];
+        if (first == b'"' || first == b'\'' || first == b'`') && first == last {
+            return trimmed[1..trimmed.len() - 1].to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
+/// Extract the named/default imports from a TS `import_statement` node, e.g.
+/// `import foo, { bar, baz } from "x"` → ["foo", "bar", "baz"]. Skip the
+/// import_specifier `as <alias>` rename — we want the local binding name so
+/// downstream tools can match references.
+fn extract_ts_imported_items(node: tree_sitter::Node<'_>, code: &str) -> Vec<String> {
+    let mut items = Vec::new();
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if child.kind() != "import_clause" {
+            continue;
+        }
+        let mut clause_cursor = child.walk();
+        for inner in child.named_children(&mut clause_cursor) {
+            match inner.kind() {
+                "identifier" => {
+                    items.push(code[inner.byte_range()].to_string());
+                }
+                "named_imports" => {
+                    let mut named_cursor = inner.walk();
+                    for spec in inner.named_children(&mut named_cursor) {
+                        if spec.kind() == "import_specifier" {
+                            // Prefer the alias if present (`name as alias`),
+                            // else the imported name.
+                            let alias = spec.child_by_field_name("alias");
+                            let name = spec.child_by_field_name("name");
+                            if let Some(n) = alias.or(name) {
+                                items.push(code[n.byte_range()].to_string());
+                            }
+                        }
+                    }
+                }
+                "namespace_import" => {
+                    let mut ns_cursor = inner.walk();
+                    for inner2 in inner.named_children(&mut ns_cursor) {
+                        if inner2.kind() == "identifier" {
+                            items.push(code[inner2.byte_range()].to_string());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    items
 }
 
 #[cfg(test)]

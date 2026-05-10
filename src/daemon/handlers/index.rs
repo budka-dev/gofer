@@ -562,18 +562,28 @@ pub async fn tool_force_reindex(args: Value, ctx: &ToolContext) -> Result<Value>
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("path required for file scope"))?;
 
-            // Mark file as pending for reindexing
-            let result = sqlx::query(
-                r#"
-                UPDATE files
-                SET indexing_status = 'pending',
-                    last_indexed_at = NULL
-                WHERE path = ?
-                "#,
-            )
-            .bind(path)
-            .execute(ctx.sqlite.pool())
-            .await?;
+            let path_owned = path.to_string();
+            let pool = ctx.sqlite.pool().clone();
+            let result = ctx
+                .sqlite
+                .with_write_retry(|| {
+                    let pool = pool.clone();
+                    let path = path_owned.clone();
+                    async move {
+                        sqlx::query(
+                            r#"
+                            UPDATE files
+                            SET indexing_status = 'pending',
+                                last_indexed_at = NULL
+                            WHERE path = ?
+                            "#,
+                        )
+                        .bind(&path)
+                        .execute(&pool)
+                        .await
+                    }
+                })
+                .await?;
 
             let updated = result.rows_affected();
 
@@ -601,17 +611,27 @@ pub async fn tool_force_reindex(args: Value, ctx: &ToolContext) -> Result<Value>
                 .ok_or_else(|| anyhow::anyhow!("path required for directory scope"))?;
 
             let pattern = format!("{}%", path);
-            let result = sqlx::query(
-                r#"
-                UPDATE files
-                SET indexing_status = 'pending',
-                    last_indexed_at = NULL
-                WHERE path LIKE ?
-                "#,
-            )
-            .bind(&pattern)
-            .execute(ctx.sqlite.pool())
-            .await?;
+            let pool = ctx.sqlite.pool().clone();
+            let result = ctx
+                .sqlite
+                .with_write_retry(|| {
+                    let pool = pool.clone();
+                    let pattern = pattern.clone();
+                    async move {
+                        sqlx::query(
+                            r#"
+                            UPDATE files
+                            SET indexing_status = 'pending',
+                                last_indexed_at = NULL
+                            WHERE path LIKE ?
+                            "#,
+                        )
+                        .bind(&pattern)
+                        .execute(&pool)
+                        .await
+                    }
+                })
+                .await?;
 
             let updated = result.rows_affected();
 
@@ -625,16 +645,24 @@ pub async fn tool_force_reindex(args: Value, ctx: &ToolContext) -> Result<Value>
         }
 
         "project" => {
-            // Mark all files as pending
-            let result = sqlx::query(
-                r#"
-                UPDATE files
-                SET indexing_status = 'pending',
-                    last_indexed_at = NULL
-                "#,
-            )
-            .execute(ctx.sqlite.pool())
-            .await?;
+            let pool = ctx.sqlite.pool().clone();
+            let result = ctx
+                .sqlite
+                .with_write_retry(|| {
+                    let pool = pool.clone();
+                    async move {
+                        sqlx::query(
+                            r#"
+                            UPDATE files
+                            SET indexing_status = 'pending',
+                                last_indexed_at = NULL
+                            "#,
+                        )
+                        .execute(&pool)
+                        .await
+                    }
+                })
+                .await?;
 
             let updated = result.rows_affected();
 

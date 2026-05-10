@@ -1,9 +1,13 @@
 #![allow(clippy::too_many_arguments)]
-use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
+use sqlx::sqlite::{
+    SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous,
+};
+use sqlx::SqlitePool;
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 
 use crate::models::{
@@ -23,6 +27,17 @@ pub enum StorageError {
 }
 
 pub type Result<T> = std::result::Result<T, StorageError>;
+
+/// Detects SQLITE_BUSY (code 5) and SQLITE_LOCKED (code 6) — the two errors that
+/// indicate a transient contention failure that's safe to retry.
+fn is_busy_error(err: &sqlx::Error) -> bool {
+    if let sqlx::Error::Database(db_err) = err {
+        if let Some(code) = db_err.code() {
+            return code == "5" || code == "6";
+        }
+    }
+    false
+}
 
 /// Sanitize a query string for FTS5 MATCH to prevent query syntax errors.
 /// FTS5 has special characters: " * - ( ) : AND OR NOT NEAR
@@ -100,39 +115,38 @@ impl SqliteStorage {
 
         let connection_string = format!("sqlite:{}?mode=rwc", db_path);
 
-        // Feature 015: Enhanced connection pooling
+        // PRAGMAs that are *per-connection* must be set via SqliteConnectOptions, not
+        // executed once on the pool. Previously busy_timeout/synchronous/cache_size were
+        // set with `sqlx::query(...).execute(&pool)`, which only configured a single
+        // connection — every other connection in the pool defaulted to busy_timeout=0
+        // and returned SQLITE_BUSY immediately on any write contention.
+        let opts = SqliteConnectOptions::from_str(&connection_string)?
+            .journal_mode(SqliteJournalMode::Wal)
+            .synchronous(SqliteSynchronous::Normal)
+            .busy_timeout(Duration::from_secs(30))
+            .pragma("cache_size", "-64000")
+            .pragma("temp_store", "MEMORY")
+            .pragma("mmap_size", "30000000000");
+
+        // Feature 015: Enhanced connection pooling.
+        // SQLite under WAL allows many concurrent readers but only one writer at a time —
+        // 64 connections was overkill and amplified write contention. 16 is plenty.
         let pool = SqlitePoolOptions::new()
-            .max_connections(64) // Max concurrent connections
-            .min_connections(5) // Keep 5 connections always ready
-            .acquire_timeout(std::time::Duration::from_secs(30)) // Wait up to 30s for connection
-            .idle_timeout(Some(std::time::Duration::from_secs(300))) // Close idle connections after 5min
-            .max_lifetime(Some(std::time::Duration::from_secs(1800))) // Recycle connections every 30min
-            .connect(&connection_string)
+            .max_connections(16)
+            .min_connections(2)
+            .acquire_timeout(Duration::from_secs(30))
+            .idle_timeout(Some(Duration::from_secs(300)))
+            .max_lifetime(Some(Duration::from_secs(1800)))
+            .connect_with(opts)
             .await?;
 
-        // Enable WAL mode and optimize for bulk operations
-        sqlx::query("PRAGMA journal_mode = WAL")
-            .execute(&pool)
-            .await?;
-        sqlx::query("PRAGMA synchronous = NORMAL")
-            .execute(&pool)
-            .await?;
-        sqlx::query("PRAGMA busy_timeout = 30000")
+        // page_size and auto_vacuum must be set before the first write to a fresh DB,
+        // and on an existing DB they're persisted — running them as ordinary statements
+        // here covers both cases without needing them on every new connection.
+        sqlx::query("PRAGMA page_size = 8192")
             .execute(&pool)
             .await?;
         sqlx::query("PRAGMA auto_vacuum = INCREMENTAL")
-            .execute(&pool)
-            .await?;
-        sqlx::query("PRAGMA cache_size = -64000") // 64MB cache
-            .execute(&pool)
-            .await?;
-        sqlx::query("PRAGMA temp_store = MEMORY")
-            .execute(&pool)
-            .await?;
-        sqlx::query("PRAGMA mmap_size = 30000000000")
-            .execute(&pool)
-            .await?;
-        sqlx::query("PRAGMA page_size = 8192")
             .execute(&pool)
             .await?;
 
@@ -140,6 +154,33 @@ impl SqliteStorage {
             pool,
             metrics: QueryMetrics::new(),
         })
+    }
+
+    /// Execute a write operation that may transiently fail with SQLITE_BUSY (code 5)
+    /// when another connection holds the write lock longer than busy_timeout. Retries
+    /// with exponential back-off (50ms → 200ms → 1s → 5s) before bubbling up.
+    pub async fn with_write_retry<F, Fut, T>(&self, mut op: F) -> Result<T>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = std::result::Result<T, sqlx::Error>>,
+    {
+        const BACKOFF_MS: &[u64] = &[50, 200, 1000, 5000];
+        let mut attempt = 0;
+        loop {
+            match op().await {
+                Ok(v) => return Ok(v),
+                Err(e) if is_busy_error(&e) && attempt < BACKOFF_MS.len() => {
+                    tracing::warn!(
+                        "SQLite busy on write (attempt {}), retrying in {}ms",
+                        attempt + 1,
+                        BACKOFF_MS[attempt]
+                    );
+                    tokio::time::sleep(Duration::from_millis(BACKOFF_MS[attempt])).await;
+                    attempt += 1;
+                }
+                Err(e) => return Err(StorageError::Database(e)),
+            }
+        }
     }
 
     /// Get pool for transaction support
@@ -1714,6 +1755,20 @@ impl SqliteStorage {
         sqlx::query("DELETE FROM chunk_cache")
             .execute(&self.pool)
             .await?;
+        Ok(())
+    }
+
+    /// Reset indexing status of all files, forcing a full re-index.
+    pub async fn reset_all_indexing_status(&self) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE files 
+            SET indexing_status = 'pending',
+                last_indexed_at = NULL
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 

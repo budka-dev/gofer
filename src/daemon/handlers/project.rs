@@ -156,15 +156,6 @@ pub async fn tool_get_api_routes(args: Value, ctx: &ToolContext) -> Result<Value
     }))
 }
 
-pub async fn tool_get_summary(args: Value, _ctx: &ToolContext) -> Result<Value> {
-    let file = args.get("file").and_then(|v| v.as_str()).unwrap_or("");
-    Ok(json!({
-        "file": file,
-        "summary": "Summarizer component has been removed for performance reasons.",
-        "source": "system"
-    }))
-}
-
 pub async fn tool_get_vue_tree(args: Value, ctx: &ToolContext) -> Result<Value> {
     let file = args.get("file").and_then(|v| v.as_str()).unwrap_or("");
 

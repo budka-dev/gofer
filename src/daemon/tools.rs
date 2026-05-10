@@ -17,7 +17,7 @@ pub async fn dispatch(name: &str, args: Value, ctx: &ToolContext) -> Result<Valu
         "get_references" => symbols::tool_get_references(args, ctx).await,
         "get_dependencies" => project::tool_get_dependencies(args, ctx).await,
         "dependency_impact" => project::tool_dependency_impact(args, ctx).await,
-        "get_errors" => diagnostics::tool_get_errors(args, ctx).await,
+        // "get_errors" => diagnostics::tool_get_errors(args, ctx).await,
         "run_diagnostics" => diagnostics::tool_run_diagnostics(args, ctx).await,
         "get_config_keys" => diagnostics::tool_get_config_keys(ctx).await,
         "get_vue_tree" => project::tool_get_vue_tree(args, ctx).await,
@@ -27,7 +27,6 @@ pub async fn dispatch(name: &str, args: Value, ctx: &ToolContext) -> Result<Valu
 
         "domain_stats" => project::tool_domain_stats(ctx).await,
 
-        "get_summary" => project::tool_get_summary(args, ctx).await,
         "search_by_purpose" => search::tool_search_by_purpose(args, ctx).await,
         "skeleton" => files::tool_skeleton(args, ctx).await,
         "verify_patch" => git::tool_verify_patch(args, ctx).await,
@@ -99,15 +98,9 @@ pub async fn dispatch(name: &str, args: Value, ctx: &ToolContext) -> Result<Valu
         "lsp_inlay_hints" => lsp::tool_lsp_inlay_hints(args, ctx).await,
         "lsp_code_actions" => lsp::tool_lsp_code_actions(args, ctx).await,
         // lsp extended (architecture navigation)
-        "lsp_document_symbols" => {
-            lsp::tool_lsp_document_symbols(args, ctx).await
-        }
-        "lsp_workspace_symbols" => {
-            lsp::tool_lsp_workspace_symbols(args, ctx).await
-        }
-        "lsp_goto_implementation" => {
-            lsp::tool_lsp_goto_implementation(args, ctx).await
-        }
+        "lsp_document_symbols" => lsp::tool_lsp_document_symbols(args, ctx).await,
+        "lsp_workspace_symbols" => lsp::tool_lsp_workspace_symbols(args, ctx).await,
+        "lsp_goto_implementation" => lsp::tool_lsp_goto_implementation(args, ctx).await,
         "lsp_rename" => lsp::tool_lsp_rename(args, ctx).await,
         "lsp_expand_macro" => lsp::tool_lsp_expand_macro(args, ctx).await,
         "lsp_incoming_calls" => lsp::tool_lsp_incoming_calls(args, ctx).await,
@@ -185,19 +178,19 @@ pub fn core_tools_list() -> Vec<Value> {
                 "required": ["name"]
             }
         }),
-        json!({
-            "name": "get_errors",
-            "description": "Get current compiler errors/warnings from cargo check or tsc. Supports pagination via offset/limit. Returns a token-optimized map clustered by file.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "file": { "type": "string", "description": "Filter errors by file path (optional)" },
-                    "severity": { "type": "string", "description": "Filter by severity: error, warning (optional)" },
-                    "offset": { "type": "integer", "description": "Pagination offset (default: 0)", "default": 0 },
-                    "limit": { "type": "integer", "description": "Max results (default: 200, max: 500)", "default": 200 }
-                }
-            }
-        }),
+        // json!({
+        //     "name": "get_errors",
+        //     "description": "Get current compiler errors/warnings from cargo check or tsc. Supports pagination via offset/limit. Returns a token-optimized map clustered by file.",
+        //     "inputSchema": {
+        //         "type": "object",
+        //         "properties": {
+        //             "file": { "type": "string", "description": "Filter errors by file path (optional)" },
+        //             "severity": { "type": "string", "description": "Filter by severity: error, warning (optional)" },
+        //             "offset": { "type": "integer", "description": "Pagination offset (default: 0)", "default": 0 },
+        //             "limit": { "type": "integer", "description": "Max results (default: 200, max: 500)", "default": 200 }
+        //         }
+        //     }
+        // }),
         json!({
             "name": "run_diagnostics",
             "description": "Run cargo check and/or tsc to refresh compiler diagnostics. You can pass options for cargo check to target specific workspaces, packages, or all targets.",
@@ -213,14 +206,16 @@ pub fn core_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "git_blame",
-            "description": "Get git blame info for a specific line in a file.",
+            "description": "Get git blame for a single line or a range. Pass `line` for one line, or `start_line`+`end_line` for a span. Returns one entry per blame hunk with `lines_in_hunk` so the caller can see how far each commit's authorship extends.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "file": { "type": "string", "description": "File path" },
-                    "line": { "type": "integer", "description": "Line number" }
+                    "line": { "type": "integer", "description": "Single line (legacy; use start_line/end_line for ranges)" },
+                    "start_line": { "type": "integer", "description": "First line of the range to blame (1-based, inclusive)" },
+                    "end_line": { "type": "integer", "description": "Last line of the range to blame (1-based, inclusive). Defaults to start_line." }
                 },
-                "required": ["file", "line"]
+                "required": ["file"]
             }
         }),
         json!({
@@ -245,19 +240,6 @@ pub fn core_tools_list() -> Vec<Value> {
                     "depth": { "type": "integer", "description": "How deep to resolve dependencies (default: 2)", "default": 2 },
                     "skeleton": { "type": "boolean", "description": "If true, strip function bodies from ALL files (main + deps)", "default": false },
                     "skeleton_deps_only": { "type": "boolean", "description": "If true, keep main file full but skeletonize dependencies only", "default": false }
-                },
-                "required": ["file"]
-            }
-        }),
-
-
-        json!({
-            "name": "get_summary",
-            "description": "Get the AI-generated or extracted summary of a file's purpose.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "file": { "type": "string", "description": "File path to get summary for" }
                 },
                 "required": ["file"]
             }
@@ -378,12 +360,14 @@ pub fn core_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "find_files",
-            "description": "Find files by glob pattern. Respects .gitignore. Returns matching file paths.",
+            "description": "Find files by glob pattern. Respects .gitignore. Returns matching file paths along with `total`, `count`, `truncated`, `limit`, and `offset` so callers can detect when the list was capped.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "pattern": { "type": "string", "description": "Glob pattern (e.g., '*.rs', '**/*.tsx', 'Cargo.*')" },
-                    "path": { "type": "string", "description": "Subdirectory to search in (relative to project root)" }
+                    "path": { "type": "string", "description": "Subdirectory to search in (relative to project root)" },
+                    "limit": { "type": "integer", "description": "Max files to return (default 100, max 10000)", "default": 100 },
+                    "offset": { "type": "integer", "description": "Number of files to skip (for pagination)", "default": 0 }
                 },
                 "required": ["pattern"]
             }
@@ -554,6 +538,11 @@ pub fn core_tools_list() -> Vec<Value> {
                         "type": "number",
                         "default": 0.3,
                         "description": "Minimum relevance score 0-1 (default: 0.3)"
+                    },
+                    "boost_recency": {
+                        "type": "number",
+                        "default": 0.2,
+                        "description": "How much recency affects ranking (0.0 = ignore recency, 0.2 = small tiebreaker, 1.0 = legacy behaviour)"
                     }
                 },
                 "required": ["query"]
@@ -593,6 +582,15 @@ pub fn core_tools_list() -> Vec<Value> {
                         "type": "boolean",
                         "default": true,
                         "description": "Continue if one operation fails (default: true)"
+                    },
+                    "summary_only": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "Drop the per-operation `data` payload — returns just success/error/timing. Useful when you only need to know which operations succeeded."
+                    },
+                    "max_chars_per_op": {
+                        "type": "integer",
+                        "description": "Truncate each operation's serialized data to this many characters. Adds `data_truncated: true` and `data_full_chars` so callers know the full size."
                     }
                 },
                 "required": ["operations"]

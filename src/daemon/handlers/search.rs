@@ -214,32 +214,40 @@ pub async fn tool_search(args: Value, ctx: &ToolContext) -> Result<Value> {
         fused
     };
 
-    // NEW: Normalize scores and filter by min_score
+    // Score reporting:
+    //
+    // Previously the `[score=...]` field was the *normalized RRF rank score* —
+    // 1.0 / (k + rank). The top result was always 1.000, regardless of whether
+    // it was actually a semantic match. That's how mcp-registry.service.ts ended
+    // up with `score=1.000` on a query about a feature that lived in a totally
+    // different file.
+    //
+    // Now: when a vector-search match is available we surface the real cosine
+    // similarity. When only FTS contributed we fall back to the RRF rank-score
+    // and label it accordingly. Filtering by `min_score` uses the cosine when
+    // present so callers can set a meaningful semantic threshold.
     let max_rrf = fused.first().map(|h| h.rrf_score).unwrap_or(1.0);
     let enhanced_results: Vec<(f32, Value)> = fused
         .into_iter()
         .map(|hit| {
-            // Normalize RRF score to 0.0-1.0
-            let normalized_score = if max_rrf > 0.0 {
+            let rank_score = if max_rrf > 0.0 {
                 (hit.rrf_score / max_rrf) as f32
             } else {
                 0.0
             };
+            // Headline score: real cosine similarity when we have it.
+            let headline_score = hit.vector_score.unwrap_or(rank_score);
 
-            // Determine match reason
             let match_reason = determine_match_reason(&hit, query);
 
-            // Generate preview if requested
             let preview = if preview_mode {
                 generate_preview(&hit.content, 3)
             } else {
                 None
             };
 
-            // Get context (symbol name)
             let context = if include_context {
                 hit.matched_symbol.clone().or_else(|| {
-                    // Try to extract function/class name from content
                     extract_context_from_content(&hit.content)
                 })
             } else {
@@ -260,7 +268,11 @@ pub async fn tool_search(args: Value, ctx: &ToolContext) -> Result<Value> {
             )];
 
             if include_scores {
-                parts.push(format!("[score={:.3}]", normalized_score));
+                if let Some(vs) = hit.vector_score {
+                    parts.push(format!("[score={:.3} rank={:.3}]", vs, rank_score));
+                } else {
+                    parts.push(format!("[rank={:.3} fts-only]", rank_score));
+                }
             }
             if include_scores || preview_mode {
                 if let Some(reason) = &match_reason {
@@ -273,7 +285,7 @@ pub async fn tool_search(args: Value, ctx: &ToolContext) -> Result<Value> {
 
             let result = json!(format!("{}\n{}", parts.join(" "), content_str));
 
-            (normalized_score, result)
+            (headline_score, result)
         })
         .filter(|(score, _)| *score >= min_score)
         .collect::<Vec<_>>();
@@ -285,6 +297,25 @@ pub async fn tool_search(args: Value, ctx: &ToolContext) -> Result<Value> {
 
     let results: Vec<Value> = enhanced_results.into_iter().map(|(_, r)| r).collect();
     let search_time_ms = search_start.elapsed().as_millis();
+
+    // Index coverage check — surfaces "embeddings 71% complete" so the caller
+    // knows results may be missing recent files. file_count comes from sqlite,
+    // chunk_count from LanceDB (the actual vector store).
+    let file_count = ctx.sqlite.get_file_count().await.unwrap_or(0);
+    let chunk_count = ctx.lance.count().await.unwrap_or(0) as i64;
+    if file_count > 10 {
+        let ratio = chunk_count as f64 / file_count as f64;
+        // bge-m3 typically produces 3+ chunks/file in well-indexed projects.
+        // Below 1.0 chunks/file the index is meaningfully incomplete and recent
+        // edits are likely unsearchable.
+        if ratio < 1.0 {
+            warnings.push(format!(
+                "Index coverage degraded: {:.2} chunks/file ({} files, {} chunks). Recent commits may be missing — run force_reindex.",
+                ratio, file_count, chunk_count
+            ));
+            degraded = true;
+        }
+    }
 
     // 6. Structured output with degraded mode info (Feature 016)
     let mut final_result = json!({
@@ -444,6 +475,13 @@ pub async fn tool_smart_file_selection(args: Value, ctx: &ToolContext) -> Result
         .get("min_score")
         .and_then(|v| v.as_f64())
         .unwrap_or(0.3) as f32;
+    // 0.2 by default — recency only nudges, doesn't dominate. Pass 0.0 to
+    // ignore recency entirely or 1.0+ to weight it as strongly as before.
+    let boost_recency = args
+        .get("boost_recency")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.2)
+        .clamp(0.0, 5.0) as f32;
 
     if query.is_empty() {
         return Err(GoferError::InvalidParams("Query is required".into()).into());
@@ -501,6 +539,7 @@ pub async fn tool_smart_file_selection(args: Value, ctx: &ToolContext) -> Result
             vector_score,
             path_score,
             symbol_score,
+            boost_recency,
         );
 
         // Generate reasoning
@@ -757,31 +796,37 @@ struct ScoringDetails {
     weights: ScoringWeights,
 }
 
-/// Calculate relevance score with adaptive weights v2
+/// Calculate relevance score with adaptive weights v2.
+///
+/// `boost_recency` is the multiplier applied to the raw recency factor (which
+/// itself ranges over a small ±5% band). At 0.0 recency is fully ignored;
+/// at 1.0 it has its full (small) effect; values >1.0 amplify it. The default
+/// of 0.2 means a brand-new file ranks roughly 1% higher than an old one with
+/// the same base score — enough to break ties, not enough to outrank a
+/// genuinely better semantic match.
 fn calculate_relevance_score_v2(
     query: &str,
     file_metadata: &FileMetadata,
     vector_score: f32,
     path_score: f32,
     symbol_score: f32,
+    boost_recency: f32,
 ) -> (f32, ScoringDetails) {
-    // 1. Determine query type and adjust weights
     let weights = calculate_adaptive_weights(query);
-
-    // 2. Calculate recency boost
-    let recency_boost = calculate_recency_boost(file_metadata.last_modified);
-
-    // 3. Calculate size penalty
+    let raw_recency = calculate_recency_boost(file_metadata.last_modified);
     let size_penalty = calculate_size_penalty(file_metadata.size_bytes);
 
-    // 4. Calculate base score
     let base_score =
         vector_score * weights.vector + path_score * weights.path + symbol_score * weights.symbols;
 
-    // 5. Apply modifiers
+    // Lerp from 1.0 (no recency effect) toward raw_recency at the user-supplied
+    // weight. Was previously a flat ×1.15 boost that could push a "recently
+    // modified" file ahead of a clearly more relevant one — see the slave-ai
+    // ActorOption.vue case where recency alone justified a top-5 placement.
+    let recency_boost = 1.0 + (raw_recency - 1.0) * boost_recency;
+
     let final_score = base_score * recency_boost * size_penalty;
 
-    // 6. Calculate confidence
     let confidence = calculate_confidence(vector_score, path_score, symbol_score);
 
     let details = ScoringDetails {

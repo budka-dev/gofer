@@ -73,9 +73,12 @@ pub async fn tool_run_diagnostics(args: Value, ctx: &ToolContext) -> Result<Valu
 
     let result = diagnostics::run_diagnostics(&ctx.root_path, &ctx.sqlite, options).await?;
 
+    // Each backend now reports its own status: ran/skipped/error. Folding
+    // skipped runs into the totals as 0/0 used to look like "no errors", which
+    // misled callers on monorepos without a root Cargo.toml.
     Ok(json!({
-        "cargo": { "errors": result.cargo_errors, "warnings": result.cargo_warnings },
-        "tsc": { "errors": result.tsc_errors, "warnings": result.tsc_warnings },
+        "cargo": serde_json::to_value(&result.cargo)?,
+        "tsc": serde_json::to_value(&result.tsc)?,
         "total": { "errors": result.total_errors, "warnings": result.total_warnings }
     }))
 }

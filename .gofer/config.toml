@@ -7,9 +7,11 @@ port = 10987
 [indexer]
 # Directories and patterns to exclude from indexing
 ignore = [
+    # === Стандартные директории ===
     "**/node_modules/**",
     "**/target/**",
     "**/.git/**",
+    "**/.husky/**",
     "**/dist/**",
     "**/build/**",
     "**/.next/**",
@@ -21,11 +23,79 @@ ignore = [
     "**/vendor/**",
     "**/.venv/**",
     "**/venv/**",
-    "**/out/**",
-    "**/.idea/**",
+    "**/.bun/**",
     "**/.vscode/**",
+    "**/.idea/**",
+
+    # === Build артефакты ===
+    "**/out/**",
     "**/tmp/**",
     "**/temp/**",
+    "**/storybook-static/**",
+    "**/.storybook/**",
+    "**/storybook-static/**",
+    "**/.vite/**",
+
+    # === Data и БД ===
+    "**/data/**",
+    "**/uploads/**",
+    "**/*.db",
+    "**/*.sqlite",
+    "**/*.rdb",
+    "**/*.dfs",
+    "**/dump*",
+
+    # === Lock файлы ===
+    "**/bun.lock",
+    "**/bun.lockb",
+    "**/package-lock.json",
+    "**/yarn.lock",
+    "**/pnpm-lock.yaml",
+    "**/Cargo.lock",
+    "**/tsconfig.tsbuildinfo",
+    "**/tsconfig.*.tsbuildinfo",
+
+    # === Лог-файлы ===
+    "**/*.log",
+    "**/logs/**",
+
+    # === Media файлы ===
+    "**/*.jpeg",
+    "**/*.jpg",
+    "**/*.png",
+    "**/*.gif",
+    "**/*.svg",
+    "**/*.mp4",
+    "**/*.woff",
+    "**/*.woff2",
+    "**/*.ttf",
+    "**/*.eot",
+
+    # === Документы (не код) ===
+    "**/*.docx",
+    "**/*.pdf",
+
+    # === Story файлы (документация UI) ===
+    "**/*.stories.ts",
+    "**/*.stories.vue",
+
+    # === Тестовые файлы в корне проекта ===
+    "test_*.ts",
+    "test_*.log",
+    "test_*.json",
+    "test_*.txt",
+    "out_*.txt",
+    "out_*.log",
+    "*.txt",
+    "*.tmp",
+    ".tmp_*",
+
+    # === Конфиги и окружение ===
+    "**/.env*",
+    "**/*.map",
+    "**/*.min.js",
+    "**/*.min.css",
+    "**/*.json",
 ]
 parallel_workers = 4
 
@@ -33,16 +103,15 @@ parallel_workers = 4
 batch_size = 32
 model = "NomicEmbedTextV15"
 pool_size = 4
+provider = "external"
+external_url = "http://193.242.151.180:8080/embed/v1/embeddings"
+external_api_key = "secret_api_key_123"
+external_model = "BAAI/bge-m3"
+dimensions = 1024
 
 [reranker]
 enabled = true
 model_dir = ".gofer/data/models/reranker"
-
-[summarizer]
-enable_llm = true
-model_id = "qwen2.5-coder:1.5b"
-max_tokens = 150
-temperature = 0.3
 
 [domains]
 rs_paths = []

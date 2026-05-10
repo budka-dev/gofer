@@ -42,8 +42,22 @@ pub async fn tool_batch_operations(args: Value, ctx: &ToolContext) -> Result<Val
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
 
+    // Output trimming controls — let callers cap the response size when they
+    // only need success/timing info or a preview. The previous behaviour (full
+    // payload of every sub-operation) frequently produced 50KB+ responses for
+    // 3-call batches, which is why callers preferred firing three separate
+    // tool calls.
+    let summary_only = args
+        .get("summary_only")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let max_chars_per_op = args
+        .get("max_chars_per_op")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize);
+
     let start = Instant::now();
-    let results;
+    let mut results;
 
     if parallel {
         // Parallel execution with rate limiting
@@ -98,11 +112,40 @@ pub async fn tool_batch_operations(args: Value, ctx: &ToolContext) -> Result<Val
         .count();
     let failed = results.len() - successful;
 
+    // Apply requested trimming. We do this after execution so we still get
+    // accurate timings from the original Value before mutating it.
+    if summary_only {
+        for r in results.iter_mut() {
+            if let Some(obj) = r.as_object_mut() {
+                obj.remove("data");
+            }
+        }
+    } else if let Some(max) = max_chars_per_op {
+        for r in results.iter_mut() {
+            if let Some(obj) = r.as_object_mut() {
+                if let Some(data) = obj.get("data").cloned() {
+                    let serialized = data.to_string();
+                    if serialized.len() > max {
+                        let mut truncated: String = serialized.chars().take(max).collect();
+                        truncated.push_str("…[truncated]");
+                        obj.insert("data".to_string(), json!(truncated));
+                        obj.insert("data_truncated".to_string(), json!(true));
+                        obj.insert(
+                            "data_full_chars".to_string(),
+                            json!(serialized.len()),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     Ok(json!({
         "total_operations": operations.len(),
         "successful": successful,
         "failed": failed,
         "parallel": parallel,
+        "summary_only": summary_only,
         "total_duration_ms": total_duration_ms,
         "results": results
     }))

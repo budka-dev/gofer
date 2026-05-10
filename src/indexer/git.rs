@@ -5,11 +5,20 @@ use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlameInfo {
+    /// First line in the file covered by this hunk (1-based).
     pub line: u32,
+    /// Number of consecutive lines this hunk spans. Callers asking about a
+    /// range need this to know how far each commit's authorship extends.
+    #[serde(default = "default_lines_in_hunk")]
+    pub lines_in_hunk: u32,
     pub commit_id: String,
     pub author: String,
     pub message: String,
     pub timestamp: i64,
+}
+
+fn default_lines_in_hunk() -> u32 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,9 +142,11 @@ impl GitRepo {
                 .unwrap_or_default();
 
             let line = hunk.final_start_line() as u32;
+            let lines_in_hunk = hunk.lines_in_hunk() as u32;
 
             results.push(BlameInfo {
                 line,
+                lines_in_hunk: lines_in_hunk.max(1),
                 commit_id,
                 author,
                 message,
@@ -284,6 +295,7 @@ impl GitRepo {
     }
 
     /// Get the commit that last modified a specific line
+    #[allow(dead_code)]
     pub fn line_history(&self, file_path: &Path, line: u32) -> Option<BlameInfo> {
         self.blame_lines(file_path, line, line).into_iter().next()
     }

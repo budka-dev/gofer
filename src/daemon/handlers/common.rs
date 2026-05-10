@@ -38,12 +38,12 @@ impl ToolContext {
         };
         
         // 2. Load manifest to find LSP details
-        let loaded_lang = match self.lang_manager.loaded_langs.get(&lang_name) {
+        let loaded_lang = match self.lang_manager.get_language(&lang_name) {
             Some(l) => l,
             None => return Ok(None)
         };
         
-        let lsp_config = match &loaded_lang.value().manifest.lsp {
+        let lsp_config = match &loaded_lang.manifest.lsp {
             Some(config) => config.clone(),
             None => return Ok(None) // No LSP configured for this language
         };
@@ -74,7 +74,23 @@ impl ToolContext {
         let mut tool_args = Vec::new();
 
         if let Some(c) = &lsp_config.command {
-            command_str = c.clone();
+            let mut cmd = c.clone();
+            
+            if let Some(url) = &lsp_config.download_url {
+                let shell_parts = shell_words::split(c).unwrap_or_else(|_| vec![c.clone()]);
+                let exe_name = shell_parts.into_iter().next().unwrap_or_else(|| c.clone());
+                
+                let local_exe = self.lang_manager.langs_dir.join(&lang_name).join("bin").join(&exe_name);
+                if !local_exe.exists() && which::which(&exe_name).is_err() {
+                    tracing::info!("LSP executable {} not found locally or in PATH. Attempting fallback download...", exe_name);
+                    if let Ok(path) = self.lang_manager.download_standalone_binary(&lang_name, &exe_name, url).await {
+                        cmd = path.to_string_lossy().to_string();
+                    }
+                } else if local_exe.exists() {
+                    cmd = local_exe.to_string_lossy().to_string();
+                }
+            }
+            command_str = cmd;
         } else if let Some(t) = &lsp_config.tool {
             if let Some(tool_manifest) = self.lang_manager.get_tool(t) {
                 if let Some(lsp_tool_config) = &tool_manifest.lsp {
@@ -119,7 +135,7 @@ impl ToolContext {
         if let Ok(file_path_buf) = resolve_path_buf(&self.root_path, file_path) {
             actual_root = find_project_root(
                 &file_path_buf,
-                &loaded_lang.value().manifest.language.root_markers,
+                &loaded_lang.manifest.language.root_markers,
                 &self.root_path
             );
         }

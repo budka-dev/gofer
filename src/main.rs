@@ -37,8 +37,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start daemon (if needed) and register current project
-    Hi,
+    /// Start the daemon process in the background
+    Up,
 
     /// Register current project with the daemon
     Init,
@@ -86,7 +86,10 @@ enum Commands {
     Watch,
 
     /// Shutdown the daemon
-    Stop,
+    Down,
+
+    /// Temporarily stop watching the current project without deleting its index
+    Sleep,
 
     /// View daemon logs
     Logs {
@@ -148,7 +151,7 @@ fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Daemon => run_daemon(),
-        Commands::Hi => handle_hi(),
+        Commands::Up => handle_up(),
         Commands::Init => handle_init(),
         Commands::Start { watch } => handle_start(watch),
         Commands::Mcp { project_dir } => handle_mcp(project_dir),
@@ -157,7 +160,8 @@ fn main() -> anyhow::Result<()> {
         Commands::Reindex { force, path } => handle_reindex(force, path),
         Commands::Search { query, limit } => handle_search(&query, limit),
         Commands::Watch => handle_watch(),
-        Commands::Stop => handle_stop(),
+        Commands::Down => handle_down(),
+        Commands::Sleep => handle_sleep(),
         Commands::Logs { lines, follow, err } => handle_logs(lines, follow, err),
         Commands::Config { action } => handle_config(action),
         Commands::InstallLang { lang } => handle_install_lang(lang),
@@ -478,27 +482,12 @@ async fn activate_with_progress(
     Ok(())
 }
 
-fn handle_hi() -> anyhow::Result<()> {
+fn handle_up() -> anyhow::Result<()> {
     let rt = cli_runtime()?;
     rt.block_on(async {
         println!("Starting daemon...");
         ensure_daemon_running().await?;
-
-        let cwd = std::env::current_dir()?.canonicalize()?;
-        let cwd_str = cwd.to_string_lossy().to_string();
-        let sock = socket_path();
-
-        let mut client = DaemonClient::connect(&sock).await?;
-
-        // Register project
-        let reg = client
-            .call(
-                "daemon/register_project",
-                json!({ "project_path": cwd_str }),
-            )
-            .await?;
-        let project_id = reg.get("id").and_then(|v| v.as_str()).unwrap_or("?");
-        println!("Registered: {} ({})", cwd_str, project_id);
+        println!("Daemon successfully started.");
 
         anyhow::Ok(())
     })
@@ -752,7 +741,7 @@ fn handle_watch() -> anyhow::Result<()> {
     })
 }
 
-fn handle_stop() -> anyhow::Result<()> {
+fn handle_down() -> anyhow::Result<()> {
     let rt = cli_runtime()?;
     rt.block_on(async {
         let sock = socket_path();
@@ -765,6 +754,27 @@ fn handle_stop() -> anyhow::Result<()> {
         let mut client = DaemonClient::connect(&sock).await?;
         let _ = client.call("daemon/shutdown", json!({})).await;
         println!("Daemon shutdown requested.");
+
+        anyhow::Ok(())
+    })
+}
+
+fn handle_sleep() -> anyhow::Result<()> {
+    let rt = cli_runtime()?;
+    rt.block_on(async {
+        let sock = socket_path();
+
+        if !DaemonClient::is_alive(&sock).await {
+            println!("Daemon is not running.");
+            return anyhow::Ok(());
+        }
+
+        let cwd = std::env::current_dir()?.canonicalize()?;
+        let cwd_str = cwd.to_string_lossy().to_string();
+
+        let mut client = DaemonClient::connect(&sock).await?;
+        let _ = client.call("daemon/deactivate_project", json!({ "project_path": cwd_str })).await;
+        println!("Project watcher paused for: {}", cwd_str);
 
         anyhow::Ok(())
     })

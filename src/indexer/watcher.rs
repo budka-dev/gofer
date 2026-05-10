@@ -36,34 +36,25 @@ pub struct IndexerConfig {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct EmbeddingConfig {
+    #[serde(default = "default_provider")]
+    pub provider: String,
     #[serde(default = "default_batch_size")]
     pub batch_size: usize,
-    /// Embedding model name (fastembed model enum variant)
-    #[serde(default = "default_embedding_model")]
-    pub model: String,
-    /// Cache directory for model files
-    #[serde(default)]
-    pub cache_dir: Option<String>,
-    /// Number of embedder pool instances (1-8)
     #[serde(default = "default_pool_size")]
     pub pool_size: usize,
-    /// Path to custom quantized ONNX model (INT8)
-    /// If specified, will use UserDefinedEmbeddingModel instead of standard model
     #[serde(default)]
-    pub quantized_model_path: Option<String>,
-    /// Path to tokenizer.json for custom model
+    pub external_url: Option<String>,
     #[serde(default)]
-    pub tokenizer_path: Option<String>,
-    /// Path to tokenizer_config.json for custom model
+    pub external_api_key: Option<String>,
     #[serde(default)]
-    pub tokenizer_config_path: Option<String>,
+    pub external_model: Option<String>,
+    #[serde(default)]
+    pub dimensions: Option<usize>,
 }
 
+fn default_provider() -> String { "external".to_string() }
 fn default_batch_size() -> usize {
     32
-}
-fn default_embedding_model() -> String {
-    "NomicEmbedTextV15".to_string()
 }
 fn default_pool_size() -> usize {
     4
@@ -72,13 +63,13 @@ fn default_pool_size() -> usize {
 impl Default for EmbeddingConfig {
     fn default() -> Self {
         Self {
+            provider: default_provider(),
             batch_size: default_batch_size(),
-            model: default_embedding_model(),
-            cache_dir: None,
             pool_size: default_pool_size(),
-            quantized_model_path: None,
-            tokenizer_path: None,
-            tokenizer_config_path: None,
+            external_url: None,
+            external_api_key: None,
+            external_model: None,
+            dimensions: None,
         }
     }
 }
@@ -175,7 +166,7 @@ pub fn find_watchable_dirs(root: &Path, extra_ignores: &[String]) -> Vec<PathBuf
 /// Start the file watcher
 pub async fn start_watcher(
     root_path: PathBuf,
-    task_tx: mpsc::Sender<IndexTask>,
+    task_tx: mpsc::Sender<Vec<IndexTask>>,
     extra_ignores: Vec<String>,
     cancel: CancellationToken,
 ) {
@@ -219,6 +210,7 @@ pub async fn start_watcher(
             // Use recv_timeout so we can check cancellation periodically
             match rx.recv_timeout(Duration::from_secs(1)) {
                 Ok(Ok(events)) => {
+                    let mut batch = Vec::new();
                     for event in events {
                         let path = event.path;
 
@@ -248,9 +240,12 @@ pub async fn start_watcher(
                         };
 
                         tracing::debug!("File event: {:?}", task);
+                        batch.push(task);
+                    }
 
-                        // Use blocking_send inside spawn_blocking
-                        if task_tx.blocking_send(task).is_err() {
+                    if !batch.is_empty() {
+                        // Send the entire batch at once
+                        if task_tx.blocking_send(batch).is_err() {
                             tracing::warn!("Indexer channel closed");
                             return;
                         }

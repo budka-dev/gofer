@@ -23,18 +23,25 @@ pub async fn create_bundle(main_path: &Path, max_depth: u32) -> ContextBundle {
         let base_dir = main_path.parent().unwrap_or(Path::new("."));
 
         for import in imports {
-            if import.is_relative {
-                if let Some(resolved) = resolve_import(&import.path, base_dir, language.clone()).await {
-                    collect_dependency(
-                        &resolved,
-                        &import.items.join(", "),
-                        &mut dependencies,
-                        &mut visited,
-                        max_depth,
-                        1,
-                    )
-                    .await;
-                }
+            // Resolve every import we can — relative, tsconfig aliases (@/),
+            // workspace packages (@scope/pkg). Previously the bundle silently
+            // skipped non-relative imports, so a TS file with 7 imports would
+            // surface zero dependencies if all were aliased.
+            let resolved = if import.is_relative {
+                resolve_import(&import.path, base_dir, language.clone()).await
+            } else {
+                resolve_non_relative_import(&import.path, main_path, language.clone()).await
+            };
+            if let Some(resolved) = resolved {
+                collect_dependency(
+                    &resolved,
+                    &import.items.join(", "),
+                    &mut dependencies,
+                    &mut visited,
+                    max_depth,
+                    1,
+                )
+                .await;
             }
         }
     }
@@ -56,6 +63,34 @@ pub async fn create_bundle(main_path: &Path, max_depth: u32) -> ContextBundle {
         total_lines,
         total_tokens_estimate,
     }
+}
+
+/// Resolve a non-relative import (alias, workspace package, node_modules).
+/// Walks up from `from_file` to find a project root (package.json or
+/// tsconfig.json) and delegates to the TS-aware resolver in
+/// `languages::typescript`. For non-TS languages we return None — bare imports
+/// in Rust/Python/Go aren't usually resolvable to a single file in the bundle
+/// model anyway.
+async fn resolve_non_relative_import(
+    import_path: &str,
+    from_file: &Path,
+    language: SupportedLanguage,
+) -> Option<PathBuf> {
+    if !matches!(
+        language.name(),
+        SupportedLanguage::TYPESCRIPT
+            | SupportedLanguage::JAVASCRIPT
+            | SupportedLanguage::VUE
+    ) {
+        return None;
+    }
+
+    // Project root = nearest ancestor with package.json or tsconfig.json.
+    let root = from_file.ancestors().find(|p| {
+        p.join("package.json").is_file() || p.join("tsconfig.json").is_file()
+    })?;
+
+    crate::languages::typescript::resolve_import_path_public(import_path, from_file, root)
 }
 
 fn resolve_import<'a>(
@@ -266,20 +301,21 @@ fn collect_dependency<'a>(
                 let base_dir = path.parent().unwrap_or(Path::new("."));
 
                 for import in imports {
-                    if import.is_relative {
-                        if let Some(resolved) =
-                            resolve_import(&import.path, base_dir, language.clone()).await
-                        {
-                            collect_dependency(
-                                &resolved,
-                                &import.items.join(", "),
-                                deps,
-                                visited,
-                                max_depth,
-                                current_depth + 1,
-                            )
-                            .await;
-                        }
+                    let resolved = if import.is_relative {
+                        resolve_import(&import.path, base_dir, language.clone()).await
+                    } else {
+                        resolve_non_relative_import(&import.path, path, language.clone()).await
+                    };
+                    if let Some(resolved) = resolved {
+                        collect_dependency(
+                            &resolved,
+                            &import.items.join(", "),
+                            deps,
+                            visited,
+                            max_depth,
+                            current_depth + 1,
+                        )
+                        .await;
                     }
                 }
             }

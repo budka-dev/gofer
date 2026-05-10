@@ -6,10 +6,30 @@ use serde_json::{json, Value};
 
 pub async fn tool_git_blame(args: Value, ctx: &ToolContext) -> Result<Value> {
     let file = args.get("file").and_then(|v| v.as_str()).unwrap_or("");
-    let line = args.get("line").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
+
+    // Accept either a single `line` or a `start_line`/`end_line` range. Older
+    // clients passing only `line` keep working; new ones can ask for a span and
+    // get one entry per line in the response. Previously the handler always
+    // collapsed to a single line so range requests silently returned just line 1.
+    let start_line = args
+        .get("start_line")
+        .and_then(|v| v.as_u64())
+        .or_else(|| args.get("line").and_then(|v| v.as_u64()))
+        .unwrap_or(1) as u32;
+    let end_line = args
+        .get("end_line")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u32)
+        .unwrap_or(start_line);
 
     if file.is_empty() {
         return Err(GoferError::InvalidParams("File path is required".into()).into());
+    }
+    if end_line < start_line {
+        return Err(GoferError::InvalidParams(
+            "end_line must be >= start_line".into(),
+        )
+        .into());
     }
 
     let repo = match GitRepo::open(&ctx.root_path) {
@@ -18,21 +38,38 @@ pub async fn tool_git_blame(args: Value, ctx: &ToolContext) -> Result<Value> {
     };
     let file_path = &ctx.root_path.join(file);
 
-    match repo.line_history(file_path, line) {
-        Some(blame) => Ok(json!({
+    let blames = repo.blame_lines(file_path, start_line, end_line);
+    if blames.is_empty() {
+        return Ok(json!({
             "file": file,
-            "line": line,
-            "author": blame.author,
-            "date": blame.timestamp,
-            "commit": &blame.commit_id[..8.min(blame.commit_id.len())],
-            "message": blame.message
-        })),
-        None => Ok(json!({
-            "file": file,
-            "line": line,
-            "message": format!("No blame info for {}:{}", file, line)
-        })),
+            "start_line": start_line,
+            "end_line": end_line,
+            "lines": [],
+            "message": format!("No blame info for {}:{}-{}", file, start_line, end_line)
+        }));
     }
+
+    let lines: Vec<Value> = blames
+        .iter()
+        .map(|b| {
+            json!({
+                "line": b.line,
+                "lines_in_hunk": b.lines_in_hunk,
+                "author": b.author,
+                "date": b.timestamp,
+                "commit": &b.commit_id[..8.min(b.commit_id.len())],
+                "message": b.message,
+            })
+        })
+        .collect();
+
+    Ok(json!({
+        "file": file,
+        "start_line": start_line,
+        "end_line": end_line,
+        "total": lines.len(),
+        "lines": lines,
+    }))
 }
 
 pub async fn tool_git_history(args: Value, ctx: &ToolContext) -> Result<Value> {

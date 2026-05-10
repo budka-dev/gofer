@@ -26,7 +26,6 @@ regex = "1"
 toml = "0.8"
 
 # Embeddings
-fastembed = "5"
 
 
 # File Watcher
@@ -79,6 +78,7 @@ dashmap = "6.1.0"
 shell-words = "1.1.1"
 flate2 = "1.1.9"
 tar = "0.4.45"
+which = "8.0.2"
 
 
 # Профиль для финального релиза (медленная сборка, максимальная оптимизация)

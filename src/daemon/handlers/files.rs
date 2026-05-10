@@ -233,20 +233,40 @@ pub async fn tool_read_function_context(args: Value, ctx: &ToolContext) -> Resul
         let root = tree.root_node();
         let query_str = match lang {
             "rust" => format!(
-                r#"(function_item name: (identifier) @name (#eq? @name "{}")) @func"#,
-                function
+                r#"[
+                    (function_item name: (identifier) @name (#eq? @name "{name}"))
+                    (function_signature_item name: (identifier) @name (#eq? @name "{name}"))
+                ] @func"#,
+                name = function
             ),
+            // Match functions in any of the common TS/JS shapes the previous query missed:
+            // class methods (instance/static), arrow functions and function expressions
+            // assigned to const/let/var, and exported variants. Names live on either
+            // `identifier` (top-level) or `property_identifier` (class methods).
             "typescript" | "javascript" => format!(
-                r#"(function_declaration name: (identifier) @name (#eq? @name "{}")) @func"#,
-                function
+                r#"[
+                    (function_declaration name: (identifier) @name (#eq? @name "{name}"))
+                    (method_definition name: (property_identifier) @name (#eq? @name "{name}"))
+                    (method_signature name: (property_identifier) @name (#eq? @name "{name}"))
+                    (variable_declarator
+                        name: (identifier) @name (#eq? @name "{name}")
+                        value: [(arrow_function) (function_expression)])
+                    (public_field_definition
+                        name: (property_identifier) @name (#eq? @name "{name}")
+                        value: [(arrow_function) (function_expression)])
+                ] @func"#,
+                name = function
             ),
             "python" => format!(
-                r#"(function_definition name: (identifier) @name (#eq? @name "{}")) @func"#,
-                function
+                r#"(function_definition name: (identifier) @name (#eq? @name "{name}")) @func"#,
+                name = function
             ),
             "go" => format!(
-                r#"(function_declaration name: (identifier) @name (#eq? @name "{}")) @func"#,
-                function
+                r#"[
+                    (function_declaration name: (identifier) @name (#eq? @name "{name}"))
+                    (method_declaration name: (field_identifier) @name (#eq? @name "{name}"))
+                ] @func"#,
+                name = function
             ),
             _ => return Err(anyhow::anyhow!("Unsupported language query")),
         };
@@ -356,9 +376,22 @@ pub async fn tool_read_types_only(args: Value, ctx: &ToolContext) -> Result<Valu
     let content = tokio::fs::read_to_string(&file_path).await?;
     let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
-    let skeleton = crate::indexer::context::skeletonize_content(&content, ext);
+    // For TS/JS, walk the AST so we catch TypeBox (`Type.Object(...)`) and Zod
+    // (`z.object(...)`) schemas plus `Static<typeof X>` aliases — patterns that
+    // the previous prefix-only line filter silently dropped on contract-style
+    // files (slave-core-contracts/src/task.ts).
+    if matches!(ext, "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs") {
+        let blocks = extract_ts_type_blocks(&content, kind_filter, include_docs);
+        return Ok(json!({
+            "file": file,
+            "kind": kind_filter,
+            "total": blocks.len(),
+            "types_content": blocks.join("\n\n"),
+        }));
+    }
 
-    // Filter lines to keep only type definitions
+    // Fallback for languages we don't AST-parse here (rust uses skeleton output)
+    let skeleton = crate::indexer::context::skeletonize_content(&content, ext);
     let filtered_lines: Vec<&str> = skeleton
         .lines()
         .filter(|line| {
@@ -384,8 +417,175 @@ pub async fn tool_read_types_only(args: Value, ctx: &ToolContext) -> Result<Valu
 
     Ok(json!({
         "file": file,
+        "kind": kind_filter,
         "types_content": filtered_lines.join("\n")
     }))
+}
+
+/// Walk the TS/JS AST and collect every type-like declaration.
+///
+/// Recognises:
+/// * `interface_declaration` → kind="interface"
+/// * `type_alias_declaration` → kind="type" (with sub-classification "interface"
+///   when the RHS is `Static<typeof X>` — TypeBox idiom for "interface from schema")
+/// * `class_declaration` → kind="class"
+/// * `enum_declaration` → kind="enum"
+/// * `lexical_declaration` whose initializer is a TypeBox `Type.X(...)` or Zod
+///   `z.X(...)` call → kind="schema" (treat as struct-equivalent so it shows up
+///   under `kind: struct`/`kind: interface` filters too)
+fn extract_ts_type_blocks(
+    content: &str,
+    kind_filter: Option<&str>,
+    include_docs: bool,
+) -> Vec<String> {
+    let lang = match crate::indexer::parser::LANG_MANAGER.get_language("typescript") {
+        Some(l) => l,
+        None => return Vec::new(),
+    };
+    let tree = match crate::indexer::parser::with_parser(|parser| {
+        parser.set_language(&lang.language).ok()?;
+        parser.parse(content, None)
+    }) {
+        Some(t) => t,
+        None => return Vec::new(),
+    };
+
+    let bytes = content.as_bytes();
+    let root = tree.root_node();
+
+    let mut out: Vec<String> = Vec::new();
+    let mut cursor = root.walk();
+    for child in root.named_children(&mut cursor) {
+        // export_statement wraps a real declaration; descend through it
+        let actual = if child.kind() == "export_statement" {
+            child
+                .named_children(&mut child.walk())
+                .next()
+                .unwrap_or(child)
+        } else {
+            child
+        };
+
+        let kind_label = classify_type_node(&actual, content);
+        let Some(kind_label) = kind_label else {
+            continue;
+        };
+
+        if let Some(filter) = kind_filter {
+            if !kind_matches(filter, kind_label) {
+                continue;
+            }
+        }
+
+        let start_byte = if include_docs {
+            // Pull preceding doc comment lines into the block
+            extend_back_to_docs(content, child.start_byte())
+        } else {
+            child.start_byte()
+        };
+        let end_byte = child.end_byte().min(bytes.len());
+        if start_byte >= end_byte {
+            continue;
+        }
+        let block = &content[start_byte..end_byte];
+        out.push(block.trim_end().to_string());
+    }
+
+    out
+}
+
+fn classify_type_node<'a>(node: &tree_sitter::Node<'a>, src: &'a str) -> Option<&'static str> {
+    match node.kind() {
+        "interface_declaration" => Some("interface"),
+        "type_alias_declaration" => {
+            // Detect `Static<typeof XSchema>` — TypeBox's interface-equivalent.
+            let val_text = node
+                .child_by_field_name("value")
+                .map(|n| &src[n.byte_range()])
+                .unwrap_or("");
+            if val_text.starts_with("Static<") || val_text.starts_with("Static <") {
+                Some("interface")
+            } else {
+                Some("type")
+            }
+        }
+        "class_declaration" | "abstract_class_declaration" => Some("class"),
+        "enum_declaration" => Some("enum"),
+        "lexical_declaration" | "variable_declaration" => {
+            // Look for `const X = Type.Object({...})` / `z.object({...})`
+            let text = &src[node.byte_range()];
+            if is_typebox_or_zod_schema(text) {
+                Some("schema")
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn is_typebox_or_zod_schema(text: &str) -> bool {
+    // Cheap text check; precise enough for the call-shape patterns we care about
+    text.contains("Type.Object(")
+        || text.contains("Type.Union(")
+        || text.contains("Type.Intersect(")
+        || text.contains("Type.Array(")
+        || text.contains("Type.Record(")
+        || text.contains("z.object(")
+        || text.contains("z.union(")
+        || text.contains("z.array(")
+        || text.contains("z.record(")
+}
+
+fn kind_matches(filter: &str, kind: &str) -> bool {
+    let filter = filter.to_ascii_lowercase();
+    if filter == kind {
+        return true;
+    }
+    // Treat "struct" and "interface" as a family that includes schemas/aliases —
+    // a TypeBox schema acts like a struct, a `Static<typeof X>` alias acts like
+    // an interface — so callers asking for either get both.
+    matches!(
+        (filter.as_str(), kind),
+        ("struct", "schema")
+            | ("interface", "schema")
+            | ("interface", "type")
+            | ("type", "schema")
+    )
+}
+
+fn extend_back_to_docs(content: &str, start: usize) -> usize {
+    let bytes = content.as_bytes();
+    let mut i = start;
+    // Walk backwards over blank lines + // / /** ... */ comments
+    while i > 0 {
+        // Find the start of the current line by scanning back to a newline
+        let line_start = content[..i].rfind('\n').map(|p| p + 1).unwrap_or(0);
+        let line = &content[line_start..i];
+        let trimmed = line.trim();
+        if trimmed.is_empty()
+            || trimmed.starts_with("//")
+            || trimmed.starts_with("/*")
+            || trimmed.starts_with("*")
+            || trimmed.starts_with("*/")
+        {
+            i = line_start;
+            if line_start == 0 {
+                break;
+            }
+            // Step over the preceding newline so we keep going
+            if bytes.get(line_start.saturating_sub(1)) == Some(&b'\n') {
+                i = line_start.saturating_sub(1);
+            }
+        } else {
+            break;
+        }
+    }
+    // Skip over any leading newline we landed on
+    while i < start && bytes.get(i) == Some(&b'\n') {
+        i += 1;
+    }
+    i
 }
 
 pub async fn tool_context_bundle(args: Value, ctx: &ToolContext) -> Result<Value> {
@@ -441,6 +641,16 @@ pub async fn tool_context_bundle(args: Value, ctx: &ToolContext) -> Result<Value
 pub async fn tool_find_files(args: Value, ctx: &ToolContext) -> Result<Value> {
     let pattern = args.get("pattern").and_then(|v| v.as_str());
     let path_filter = args.get("path").and_then(|v| v.as_str());
+    // Surface truncation explicitly. Defaults match prior behaviour (100 files)
+    // but the response now includes `total`/`truncated`/`limit`/`offset` so the
+    // caller can paginate or widen the limit instead of guessing whether the
+    // list was cut short.
+    let limit = args
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(100)
+        .min(10_000) as usize;
+    let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
     let Some(pat) = pattern else {
         return Err(GoferError::InvalidParams("Pattern is required".into()).into());
@@ -452,11 +662,14 @@ pub async fn tool_find_files(args: Value, ctx: &ToolContext) -> Result<Value> {
         ctx.root_path.as_ref().clone()
     };
 
-    // Check if search_root exists
     if !search_root.exists() {
         return Ok(json!({
             "pattern": pat,
+            "total": 0,
             "count": 0,
+            "limit": limit,
+            "offset": offset,
+            "truncated": false,
             "files": []
         }));
     }
@@ -464,14 +677,12 @@ pub async fn tool_find_files(args: Value, ctx: &ToolContext) -> Result<Value> {
     let pat_string = pat.to_string();
     let ctx_root_path = ctx.root_path.clone();
 
-    let files = tokio::task::spawn_blocking(move || {
+    let all_files = tokio::task::spawn_blocking(move || {
         let mut files = Vec::new();
 
-        // Parse glob pattern inside block
         let glob_pattern =
             glob::Pattern::new(&pat_string).map_err(|e| format!("Invalid glob pattern: {}", e))?;
 
-        // Use WalkDir for traversal
         let walker = WalkDir::new(&search_root).into_iter();
 
         for entry in walker.filter_map(|e| e.ok()) {
@@ -479,12 +690,10 @@ pub async fn tool_find_files(args: Value, ctx: &ToolContext) -> Result<Value> {
                 continue;
             }
 
-            // Skip .git directories
             if entry.path().to_string_lossy().contains("/.git/") {
                 continue;
             }
 
-            // Get relative path from search_root for pattern matching
             let relative_to_search = entry
                 .path()
                 .strip_prefix(&search_root)
@@ -492,7 +701,6 @@ pub async fn tool_find_files(args: Value, ctx: &ToolContext) -> Result<Value> {
                 .and_then(|p| p.to_str())
                 .unwrap_or("");
 
-            // Match against glob pattern
             if glob_pattern.matches(relative_to_search) {
                 files.push(make_relative(
                     &ctx_root_path,
@@ -506,102 +714,56 @@ pub async fn tool_find_files(args: Value, ctx: &ToolContext) -> Result<Value> {
     .map_err(|e| GoferError::Internal(anyhow::anyhow!("Task panic: {}", e)))?
     .map_err(|e| GoferError::Internal(anyhow::anyhow!(e)))?;
 
+    let total = all_files.len();
+    let page: Vec<String> = all_files.into_iter().skip(offset).take(limit).collect();
+    let count = page.len();
+    let truncated = offset + count < total;
+
     Ok(json!({
         "pattern": pat,
-        "count": files.len(),
-        "files": files
+        "total": total,
+        "count": count,
+        "limit": limit,
+        "offset": offset,
+        "truncated": truncated,
+        "files": page
     }))
 }
 
+/// `grep` is now a thin alias around `tool_search_files`. Both used to walk the
+/// tree with regex and produce the same shape of results — keeping two parallel
+/// implementations meant fixing every bug twice. The wrapper translates the old
+/// argument names (`pattern`/`path` → `regex_pattern`/`directory`) so existing
+/// callers keep working.
 pub async fn tool_grep(args: Value, ctx: &ToolContext) -> Result<Value> {
-    let pattern = args.get("pattern").and_then(|v| v.as_str());
-    let path_filter = args.get("path").and_then(|v| v.as_str());
-    let glob_filter = args.get("glob").and_then(|v| v.as_str());
-    let case_insensitive = args
-        .get("case_insensitive")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let max_results = args
-        .get("max_results")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(100) as usize;
+    let pattern = args
+        .get("pattern")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| GoferError::InvalidParams("Pattern is required".into()))?;
 
-    let Some(pat) = pattern else {
-        return Err(GoferError::InvalidParams("Pattern is required".into()).into());
-    };
-
-    use regex::RegexBuilder;
-
-    let re = RegexBuilder::new(pat)
-        .case_insensitive(case_insensitive)
-        .build()
-        .map_err(|e| GoferError::InvalidParams(format!("Invalid regex: {}", e)))?;
-
-    let search_root = if let Some(p) = path_filter {
-        ctx.root_path.join(p)
-    } else {
-        ctx.root_path.as_ref().clone()
-    };
-
-    let glob_filter_string = glob_filter.map(|s| s.to_string());
-    let ctx_root_path = ctx.root_path.clone();
-
-    let (file_matches, count) = tokio::task::spawn_blocking(move || {
-        let mut file_matches: std::collections::HashMap<String, Vec<String>> =
-            std::collections::HashMap::new();
-        let mut count = 0;
-
-        let walker = WalkDir::new(&search_root).into_iter();
-
-        let glob_pat = glob_filter_string.and_then(|g| glob::Pattern::new(&g).ok());
-
-        for entry in walker.filter_map(|e| e.ok()) {
-            if !entry.file_type().is_file() {
-                continue;
-            }
-
-            if entry.path().to_string_lossy().contains("/.git/") {
-                continue;
-            }
-
-            if let Some(ref gp) = glob_pat {
-                if !gp.matches_path(entry.path()) {
-                    continue;
-                }
-            }
-
-            if let Ok(content) = std::fs::read_to_string(entry.path()) {
-                let mut file_hits = Vec::new();
-                for (i, line) in content.lines().enumerate() {
-                    if re.is_match(line) {
-                        file_hits.push(format!("{}: {}", i + 1, line.trim()));
-                        count += 1;
-                        if count >= max_results {
-                            break;
-                        }
-                    }
-                }
-                if !file_hits.is_empty() {
-                    let rel_path =
-                        make_relative(&ctx_root_path, entry.path().to_str().unwrap_or(""));
-                    file_matches.insert(rel_path, file_hits);
-                }
-            }
-            if count >= max_results {
-                break;
-            }
+    let mut forwarded = serde_json::Map::new();
+    forwarded.insert("regex_pattern".to_string(), json!(pattern));
+    if let Some(p) = args.get("path") {
+        forwarded.insert("directory".to_string(), p.clone());
+    }
+    if let Some(v) = args.get("case_insensitive") {
+        forwarded.insert("case_insensitive".to_string(), v.clone());
+    }
+    if let Some(v) = args.get("max_results") {
+        forwarded.insert("max_results".to_string(), v.clone());
+    }
+    if let Some(v) = args.get("context_lines") {
+        forwarded.insert("context_lines".to_string(), v.clone());
+    }
+    // `glob` (e.g. `*.rs`) didn't exist on search_files; translate to
+    // `file_extension` when it's a simple `*.<ext>` pattern.
+    if let Some(g) = args.get("glob").and_then(|v| v.as_str()) {
+        if let Some(ext) = g.strip_prefix("*.") {
+            forwarded.insert("file_extension".to_string(), json!(ext));
         }
-        Ok::<_, String>((file_matches, count))
-    })
-    .await
-    .map_err(|e| GoferError::Internal(anyhow::anyhow!("Task panic: {}", e)))?
-    .map_err(|e| GoferError::Internal(anyhow::anyhow!(e)))?;
+    }
 
-    Ok(json!({
-        "pattern": pat,
-        "count": count,
-        "matches": file_matches
-    }))
+    crate::daemon::handlers::file_ops::tool_search_files(Value::Object(forwarded), ctx).await
 }
 
 // === Helpers ===

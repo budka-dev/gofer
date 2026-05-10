@@ -1,8 +1,8 @@
 use serde::Deserialize;
 use std::path::Path;
-use std::process::Command;
 use std::sync::Arc;
 use std::time::Instant;
+use tokio::process::Command as TokioCommand;
 use tokio::sync::Mutex;
 
 use crate::storage::SqliteStorage;
@@ -90,15 +90,57 @@ pub struct CargoCheckOptions {
     pub manifest_path: Option<String>,
 }
 
+/// Status of one diagnostic backend run.
+///
+/// Distinguishing `Skipped` from `Ran(0,0)` is the whole point: a monorepo
+/// without `Cargo.toml` at the root used to silently report `cargo: 0/0`,
+/// which looked like "no errors" rather than "didn't run". Now callers can
+/// see which backends actually executed.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "status", rename_all = "lowercase")]
+pub enum CheckStatus {
+    Ran { errors: usize, warnings: usize },
+    Skipped { reason: String },
+    Error { message: String },
+}
+
+impl CheckStatus {
+    pub fn errors(&self) -> usize {
+        if let CheckStatus::Ran { errors, .. } = self {
+            *errors
+        } else {
+            0
+        }
+    }
+    pub fn warnings(&self) -> usize {
+        if let CheckStatus::Ran { warnings, .. } = self {
+            *warnings
+        } else {
+            0
+        }
+    }
+}
+
 /// Run cargo check and collect diagnostics
 pub async fn run_cargo_check(
     root: &Path,
     sqlite: &SqliteStorage,
     options: CargoCheckOptions,
-) -> anyhow::Result<(usize, usize)> {
+) -> anyhow::Result<CheckStatus> {
     let cargo_toml = root.join("Cargo.toml");
-    if !cargo_toml.exists() {
-        return Ok((0, 0));
+    let manifest_override = options.manifest_path.as_ref().map(|p| root.join(p));
+    if !cargo_toml.exists() && manifest_override.as_ref().map(|p| p.exists()).unwrap_or(true) == false {
+        return Ok(CheckStatus::Skipped {
+            reason: format!(
+                "no Cargo.toml at {} and manifest_path not found",
+                root.display()
+            ),
+        });
+    }
+    if !cargo_toml.exists() && manifest_override.is_none() {
+        return Ok(CheckStatus::Skipped {
+            reason: format!("no Cargo.toml at {}", root.display()),
+        });
     }
 
     tracing::info!("Running cargo check with options: {:?}", options);
@@ -119,7 +161,14 @@ pub async fn run_cargo_check(
         cmd.arg("--manifest-path").arg(manifest);
     }
 
-    let output = cmd.current_dir(root).output().await?;
+    let output = match cmd.current_dir(root).output().await {
+        Ok(o) => o,
+        Err(e) => {
+            return Ok(CheckStatus::Error {
+                message: format!("cargo failed to spawn: {}", e),
+            });
+        }
+    };
 
     // Clear existing errors
     sqlite.clear_active_errors().await?;
@@ -150,7 +199,10 @@ pub async fn run_cargo_check(
         error_count,
         warning_count
     );
-    Ok((error_count, warning_count))
+    Ok(CheckStatus::Ran {
+        errors: error_count,
+        warnings: warning_count,
+    })
 }
 
 async fn process_cargo_message(
@@ -198,95 +250,119 @@ async fn process_cargo_message(
     Ok(())
 }
 
-/// Run tsc --noEmit and collect diagnostics
-pub async fn run_tsc_check(root: &Path, sqlite: &SqliteStorage) -> anyhow::Result<(usize, usize)> {
-    let tsconfig = root.join("tsconfig.json");
-    let package_json = root.join("package.json");
+/// Run tsc --noEmit against every tsconfig.json in the project (root + workspaces).
+///
+/// On a monorepo there is rarely a usable root tsconfig — each package has
+/// its own. Previously this just ran `tsc` in the root with no `-p`, which on
+/// projects without a root tsconfig produced zero diagnostics (tsc help
+/// banner) that we then reported as "0 errors". Now we discover and run each
+/// tsconfig separately.
+pub async fn run_tsc_check(root: &Path, sqlite: &SqliteStorage) -> anyhow::Result<CheckStatus> {
+    let tsconfigs = crate::languages::typescript::discover_workspace_tsconfigs(root);
 
-    if !tsconfig.exists() && !package_json.exists() {
-        return Ok((0, 0));
+    if tsconfigs.is_empty() {
+        return Ok(CheckStatus::Skipped {
+            reason: "no tsconfig.json discovered".to_string(),
+        });
     }
 
-    // Check if tsc is available (try npx first, then global)
-    let tsc_cmd = if root.join("node_modules/.bin/tsc").exists() {
-        "./node_modules/.bin/tsc"
-    } else {
-        "npx"
-    };
-
-    tracing::info!("Running TypeScript check...");
-
-    let output = if tsc_cmd == "npx" {
-        Command::new("npx")
-            .args(["tsc", "--noEmit", "--pretty", "false"])
-            .current_dir(root)
-            .output()
-    } else {
-        Command::new(tsc_cmd)
-            .args(["--noEmit", "--pretty", "false"])
-            .current_dir(root)
-            .output()
-    };
-
-    let output = match output {
-        Ok(o) => o,
-        Err(_) => {
-            tracing::warn!("TypeScript compiler not available");
-            return Ok((0, 0));
-        }
-    };
+    let tsc_local = root.join("node_modules/.bin/tsc");
+    let tsc_local_exists = tsc_local.exists();
 
     let mut error_count = 0;
     let mut warning_count = 0;
-
-    // Parse tsc output (format: "file(line,col): error TSxxxx: message")
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let combined = format!("{}{}", stdout, stderr);
-
+    let mut ran_any = false;
     let re = regex::Regex::new(r"^(.+?)\((\d+),(\d+)\):\s*(error|warning)\s+(TS\d+):\s*(.+)$")?;
 
-    for line in combined.lines() {
-        if let Some(caps) = re.captures(line) {
-            let file = caps.get(1).map(|m| m.as_str()).unwrap_or("");
-            let line_num: i32 = caps
-                .get(2)
-                .and_then(|m| m.as_str().parse().ok())
-                .unwrap_or(0);
-            let col: i32 = caps
-                .get(3)
-                .and_then(|m| m.as_str().parse().ok())
-                .unwrap_or(0);
-            let severity = caps.get(4).map(|m| m.as_str()).unwrap_or("error");
-            let code = caps.get(5).map(|m| m.as_str()).unwrap_or("");
-            let message = caps.get(6).map(|m| m.as_str()).unwrap_or("");
+    for tsconfig in &tsconfigs {
+        let tsconfig_arg = tsconfig.to_string_lossy().to_string();
+        let output = if tsc_local_exists {
+            TokioCommand::new(&tsc_local)
+                .args(["--noEmit", "--pretty", "false", "-p", &tsconfig_arg])
+                .current_dir(root)
+                .output()
+                .await
+        } else {
+            TokioCommand::new("npx")
+                .args([
+                    "--no-install",
+                    "tsc",
+                    "--noEmit",
+                    "--pretty",
+                    "false",
+                    "-p",
+                    &tsconfig_arg,
+                ])
+                .current_dir(root)
+                .output()
+                .await
+        };
 
-            if severity == "error" {
-                error_count += 1;
-            } else {
-                warning_count += 1;
+        let output = match output {
+            Ok(o) => o,
+            Err(_) => {
+                tracing::warn!("TypeScript compiler not available for {}", tsconfig_arg);
+                continue;
             }
+        };
+        ran_any = true;
 
-            sqlite
-                .insert_error(
-                    file,
-                    line_num,
-                    Some(col),
-                    severity,
-                    Some(code),
-                    message,
-                    None,
-                )
-                .await?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let combined = format!("{}{}", stdout, stderr);
+
+        for line in combined.lines() {
+            if let Some(caps) = re.captures(line) {
+                let file = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+                let line_num: i32 = caps
+                    .get(2)
+                    .and_then(|m| m.as_str().parse().ok())
+                    .unwrap_or(0);
+                let col: i32 = caps
+                    .get(3)
+                    .and_then(|m| m.as_str().parse().ok())
+                    .unwrap_or(0);
+                let severity = caps.get(4).map(|m| m.as_str()).unwrap_or("error");
+                let code = caps.get(5).map(|m| m.as_str()).unwrap_or("");
+                let message = caps.get(6).map(|m| m.as_str()).unwrap_or("");
+
+                if severity == "error" {
+                    error_count += 1;
+                } else {
+                    warning_count += 1;
+                }
+
+                sqlite
+                    .insert_error(
+                        file,
+                        line_num,
+                        Some(col),
+                        severity,
+                        Some(code),
+                        message,
+                        None,
+                    )
+                    .await?;
+            }
         }
     }
 
+    if !ran_any {
+        return Ok(CheckStatus::Error {
+            message: "tsc not available (install typescript or run `bun install`)".to_string(),
+        });
+    }
+
     tracing::info!(
-        "TypeScript check complete: {} errors, {} warnings",
+        "TypeScript check complete: {} errors, {} warnings across {} tsconfigs",
         error_count,
-        warning_count
+        warning_count,
+        tsconfigs.len()
     );
-    Ok((error_count, warning_count))
+    Ok(CheckStatus::Ran {
+        errors: error_count,
+        warnings: warning_count,
+    })
 }
 
 /// Run all available diagnostics (rate-limited)
@@ -296,30 +372,35 @@ pub async fn run_diagnostics(
     options: CargoCheckOptions,
 ) -> anyhow::Result<DiagnosticsResult> {
     if !rate_check(&LAST_DIAGNOSTICS, DIAGNOSTICS_COOLDOWN_SECS).await {
+        let skipped = CheckStatus::Skipped {
+            reason: "rate-limited".to_string(),
+        };
         return Ok(DiagnosticsResult {
             total_errors: 0,
             total_warnings: 0,
-            cargo_errors: 0,
-            cargo_warnings: 0,
-            tsc_errors: 0,
-            tsc_warnings: 0,
+            cargo: skipped.clone(),
+            tsc: skipped,
         });
     }
 
     sqlite.clear_active_errors().await?;
 
-    let (cargo_errors, cargo_warnings) = run_cargo_check(root, sqlite, options)
+    let cargo = run_cargo_check(root, sqlite, options)
         .await
-        .unwrap_or((0, 0));
-    let (tsc_errors, tsc_warnings) = run_tsc_check(root, sqlite).await.unwrap_or((0, 0));
+        .unwrap_or_else(|e| CheckStatus::Error {
+            message: e.to_string(),
+        });
+    let tsc = run_tsc_check(root, sqlite)
+        .await
+        .unwrap_or_else(|e| CheckStatus::Error {
+            message: e.to_string(),
+        });
 
     Ok(DiagnosticsResult {
-        total_errors: cargo_errors + tsc_errors,
-        total_warnings: cargo_warnings + tsc_warnings,
-        cargo_errors,
-        cargo_warnings,
-        tsc_errors,
-        tsc_warnings,
+        total_errors: cargo.errors() + tsc.errors(),
+        total_warnings: cargo.warnings() + tsc.warnings(),
+        cargo,
+        tsc,
     })
 }
 
@@ -327,10 +408,8 @@ pub async fn run_diagnostics(
 pub struct DiagnosticsResult {
     pub total_errors: usize,
     pub total_warnings: usize,
-    pub cargo_errors: usize,
-    pub cargo_warnings: usize,
-    pub tsc_errors: usize,
-    pub tsc_warnings: usize,
+    pub cargo: CheckStatus,
+    pub tsc: CheckStatus,
 }
 
 // === verify_patch: Sandboxed Verification ===

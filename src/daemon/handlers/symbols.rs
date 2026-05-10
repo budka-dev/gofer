@@ -206,7 +206,7 @@ pub async fn tool_get_callers(args: Value, ctx: &ToolContext) -> Result<Value> {
     }))
 }
 
-pub async fn tool_get_callees(args: Value, _ctx: &ToolContext) -> Result<Value> {
+pub async fn tool_get_callees(args: Value, ctx: &ToolContext) -> Result<Value> {
     let symbol = args.get("symbol").and_then(|v| v.as_str()).unwrap_or("");
     let file = args.get("file").and_then(|v| v.as_str());
 
@@ -214,12 +214,49 @@ pub async fn tool_get_callees(args: Value, _ctx: &ToolContext) -> Result<Value> 
         return Err(GoferError::InvalidParams("Symbol name is required".into()).into());
     }
 
-    // Placeholder
+    // Locate the source symbol — prefer the one in the requested file when given,
+    // otherwise fall through to a global match (returning the first hit).
+    let source = if let Some(f) = file {
+        let abs_path = resolve_path(&ctx.root_path, f);
+        ctx.sqlite
+            .find_symbol_by_name_and_file(symbol, &abs_path)
+            .await?
+    } else {
+        ctx.sqlite
+            .search_symbols(symbol, 1)
+            .await?
+            .into_iter()
+            .next()
+    };
+
+    let source = match source {
+        Some(s) => s,
+        None => {
+            return Ok(json!({
+                "symbol": symbol,
+                "file": file,
+                "total": 0,
+                "callees": [],
+                "message": "Source symbol not found in index"
+            }));
+        }
+    };
+
+    let refs = ctx.sqlite.get_outgoing_references(source.id).await?;
+    let calls: Vec<&crate::models::SymbolReference> =
+        refs.iter().filter(|r| r.kind == "call").collect();
+
     Ok(json!({
         "symbol": symbol,
         "file": file,
-        "total": 0,
-        "callees": []
+        "total": calls.len(),
+        "callees": calls.iter().map(|r| {
+            json!({
+                "name": r.target_name,
+                "line": r.line,
+                "resolved": r.target_symbol_id.is_some(),
+            })
+        }).collect::<Vec<_>>()
     }))
 }
 
