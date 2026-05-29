@@ -218,7 +218,7 @@ pub async fn tool_read_function_context(args: Value, ctx: &ToolContext) -> Resul
     };
 
     // Extract data from AST synchronously in a block to ensure !Send types (Node, etc) are dropped
-    let (function_code, start_line, end_line, type_names, callee_names) = {
+    let (function_code, start_line, end_line, type_names, callee_names, imports_filtered) = {
         let language = crate::indexer::parser::LANG_MANAGER.get_language(lang).expect("Lang not loaded").language.clone();
 
         let tree_opt = crate::indexer::parser::with_parser(|parser| {
@@ -319,12 +319,25 @@ pub async fn tool_read_function_context(args: Value, ctx: &ToolContext) -> Resul
             HashSet::new()
         };
 
+        let imports_filtered = if include_imports {
+            let all_imports = collect_imports(&tree, &content, lang)?;
+            let used_idents = collect_function_identifiers(&function_node, &content, lang)?;
+            all_imports
+                .into_iter()
+                .filter(|(_text, names)| names.iter().any(|n| used_idents.contains(n)))
+                .map(|(text, _)| text)
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+
         (
             function_code,
             start_line,
             end_line,
             type_names,
             callee_names,
+            imports_filtered,
         )
     };
 
@@ -334,10 +347,7 @@ pub async fn tool_read_function_context(args: Value, ctx: &ToolContext) -> Resul
         types = resolve_types(type_names, &ctx.sqlite, file).await?;
     }
 
-    let mut imports: Vec<String> = Vec::new();
-    if include_imports {
-        imports = vec![]; // Placeholder
-    }
+    let imports: Vec<String> = imports_filtered;
 
     let mut callees = Vec::new();
     if include_callees {
@@ -736,34 +746,314 @@ pub async fn tool_find_files(args: Value, ctx: &ToolContext) -> Result<Value> {
 /// argument names (`pattern`/`path` → `regex_pattern`/`directory`) so existing
 /// callers keep working.
 pub async fn tool_grep(args: Value, ctx: &ToolContext) -> Result<Value> {
+    use super::common::make_relative_pathbuf;
+    use regex::RegexBuilder;
+    use walkdir::WalkDir;
+
     let pattern = args
         .get("pattern")
         .and_then(|v| v.as_str())
         .ok_or_else(|| GoferError::InvalidParams("Pattern is required".into()))?;
 
-    let mut forwarded = serde_json::Map::new();
-    forwarded.insert("regex_pattern".to_string(), json!(pattern));
-    if let Some(p) = args.get("path") {
-        forwarded.insert("directory".to_string(), p.clone());
+    let directory = args.get("path").and_then(|v| v.as_str());
+    let context_lines = args
+        .get("context_lines")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as usize;
+    let case_insensitive = args
+        .get("case_insensitive")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let max_results = args
+        .get("max_results")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(100) as usize;
+
+    let file_extension = args.get("glob").and_then(|v| v.as_str()).and_then(|g| {
+        g.strip_prefix("*.").map(|s| s.to_string())
+    });
+
+    let re = RegexBuilder::new(pattern)
+        .case_insensitive(case_insensitive)
+        .build()
+        .map_err(|e| GoferError::InvalidParams(format!("Invalid regex: {}", e)))?;
+
+    let search_root = if let Some(dir) = directory {
+        super::common::resolve_path_buf(&ctx.root_path, dir)?
+    } else {
+        ctx.root_path.as_ref().clone()
+    };
+
+    if !search_root.exists() {
+        return Err(
+            GoferError::InvalidParams(format!("Directory not found: {:?}", search_root)).into(),
+        );
     }
-    if let Some(v) = args.get("case_insensitive") {
-        forwarded.insert("case_insensitive".to_string(), v.clone());
-    }
-    if let Some(v) = args.get("max_results") {
-        forwarded.insert("max_results".to_string(), v.clone());
-    }
-    if let Some(v) = args.get("context_lines") {
-        forwarded.insert("context_lines".to_string(), v.clone());
-    }
-    // `glob` (e.g. `*.rs`) didn't exist on search_files; translate to
-    // `file_extension` when it's a simple `*.<ext>` pattern.
-    if let Some(g) = args.get("glob").and_then(|v| v.as_str()) {
-        if let Some(ext) = g.strip_prefix("*.") {
-            forwarded.insert("file_extension".to_string(), json!(ext));
+
+    let mut file_matches: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    let mut total_matches = 0;
+    let mut files_searched = 0;
+
+    let walker = WalkDir::new(&search_root).into_iter().filter_entry(|e| {
+        let path_str = e.path().to_string_lossy();
+        !path_str.contains("/.git/")
+            && !path_str.contains("/node_modules/")
+            && !path_str.contains("/target/")
+            && !path_str.contains("/dist/")
+            && !path_str.contains("/.gofer/")
+    });
+
+    for entry in walker.filter_map(|e| e.ok()) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+
+        let path = entry.path();
+
+        if let Some(ref ext) = file_extension {
+            if !path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e == ext.trim_start_matches('.'))
+                .unwrap_or(false)
+            {
+                continue;
+            }
+        }
+
+        if let Ok(content) = tokio::fs::read_to_string(path).await {
+            files_searched += 1;
+            let lines: Vec<&str> = content.lines().collect();
+
+            for (line_num, line) in lines.iter().enumerate() {
+                if re.is_match(line) {
+                    let match_line = line_num + 1;
+
+                    let context_before = if context_lines > 0 {
+                        let start = line_num.saturating_sub(context_lines);
+                        lines[start..line_num]
+                            .iter()
+                            .map(|s| s.to_string())
+                            .collect::<Vec<_>>()
+                    } else {
+                        Vec::new()
+                    };
+
+                    let context_after = if context_lines > 0 {
+                        let end = (line_num + 1 + context_lines).min(lines.len());
+                        lines[(line_num + 1)..end]
+                            .iter()
+                            .map(|s| s.to_string())
+                            .collect::<Vec<_>>()
+                    } else {
+                        Vec::new()
+                    };
+
+                    let rel_path = make_relative_pathbuf(&ctx.root_path, path);
+                    let hit_text = if context_lines > 0 {
+                        let mut ctx_str = String::new();
+                        for (i, c) in context_before.iter().enumerate() {
+                            ctx_str.push_str(&format!(
+                                "  {}: {}\n",
+                                line_num.saturating_sub(context_before.len() - i) + 1,
+                                c
+                            ));
+                        }
+                        ctx_str.push_str(&format!("> {}: {}\n", match_line, line.trim()));
+                        for (i, c) in context_after.iter().enumerate() {
+                            ctx_str.push_str(&format!("  {}: {}\n", match_line + 1 + i, c));
+                        }
+                        ctx_str
+                    } else {
+                        format!("{}: {}", match_line, line.trim())
+                    };
+                    file_matches
+                        .entry(rel_path)
+                        .or_default()
+                        .push(hit_text.trim_end().to_string());
+
+                    total_matches += 1;
+                    if total_matches >= max_results {
+                        break;
+                    }
+                }
+            }
+
+            if total_matches >= max_results {
+                break;
+            }
         }
     }
 
-    crate::daemon::handlers::file_ops::tool_search_files(Value::Object(forwarded), ctx).await
+    Ok(json!({
+        "matches": file_matches,
+        "total_matches": total_matches,
+        "files_searched": files_searched,
+        "truncated": total_matches >= max_results,
+    }))
+}
+
+/// Find imports in a file whose local binding is never used in the rest of the
+/// file. Works per-file (project-wide scan is just a loop on the caller side).
+///
+/// Algorithm:
+/// 1. Parse the file's imports through `CodeParser::parse_imports`. This gives
+///    `ImportInfo { path, items, line }` per statement, where `items` holds the
+///    local binding names (`a as b → b`, `from x import y → y`, etc.).
+/// 2. Build the set of import-statement line ranges so we can exclude them when
+///    checking for usage — referencing the imported name from inside its own
+///    `use`/`import` statement doesn't count as "used".
+/// 3. For every (statement, item) pair, run a word-boundary regex over the
+///    non-import lines. First match means used.
+///
+/// Caveats:
+/// - Multi-line Rust imports: `use a::{\n  b,\n  c,\n};` — only the start line
+///   is excluded. If someone uses the same identifier as a name on a
+///   continuation line of the same import, it's still marked used. Negligible
+///   in practice.
+/// - Wildcard imports (`use foo::*;`, `from foo import *`) are skipped — we
+///   can't verify them statically without resolving the source module.
+/// - Macros and `eprintln!`-style invocations get matched too — that's correct,
+///   they're real usages.
+/// - Re-exports (`pub use a::b::c`) of items that aren't referenced inside the
+///   file but are re-exported by virtue of `pub` look unused. Pass
+///   `include_reexports=false` (default) to filter them out.
+pub async fn tool_find_unused_imports(args: Value, ctx: &ToolContext) -> Result<Value> {
+    use crate::indexer::parser::core::CodeParser;
+    use crate::indexer::parser::SupportedLanguage;
+    use regex::Regex;
+
+    let file = args
+        .get("file")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| GoferError::InvalidParams("`file` is required".into()))?;
+    let include_reexports = args
+        .get("include_reexports")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let abs_path = super::common::resolve_path(&ctx.root_path, file);
+    let content = tokio::fs::read_to_string(&abs_path)
+        .await
+        .map_err(|e| GoferError::InvalidParams(format!("Cannot read {}: {}", file, e)))?;
+
+    let ext = std::path::Path::new(&abs_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .ok_or_else(|| {
+            GoferError::InvalidParams(format!("Cannot determine language for {}", file))
+        })?;
+
+    let lang_name = crate::indexer::parser::LANG_MANAGER
+        .get_language_by_ext(ext)
+        .ok_or_else(|| {
+            GoferError::InvalidParams(format!(
+                "Language for extension '{}' not loaded. Try `gofer install-lang <name>`.",
+                ext
+            ))
+        })?;
+
+    let lang = SupportedLanguage(lang_name.clone());
+    let mut parser = CodeParser::new();
+    let imports = parser.parse_imports(&content, lang);
+
+    // Collect line numbers that belong to import statements. parse_imports
+    // returns the *start* line of each statement; for multi-line imports we
+    // walk forward until we hit a line that doesn't end with a continuation.
+    // Cheap heuristic: extend through trailing `,` / `\` / open braces.
+    let lines_owned: Vec<String> = content.lines().map(String::from).collect();
+    let mut import_lines: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    for imp in &imports {
+        let start = imp.line as usize;
+        if start >= lines_owned.len() {
+            continue;
+        }
+        import_lines.insert(imp.line);
+        // Walk forward while the previous line looks like an unfinished
+        // statement (Rust/Python/Go conventions).
+        let mut depth: i32 = 0;
+        for (i, line) in lines_owned.iter().enumerate().skip(start) {
+            for ch in line.chars() {
+                match ch {
+                    '{' | '(' | '[' => depth += 1,
+                    '}' | ')' | ']' => depth -= 1,
+                    _ => {}
+                }
+            }
+            import_lines.insert(i as u32);
+            let trimmed = line.trim_end();
+            let cont = trimmed.ends_with(',')
+                || trimmed.ends_with('\\')
+                || trimmed.ends_with('(')
+                || trimmed.ends_with('{')
+                || trimmed.ends_with('[');
+            if depth <= 0 && !cont {
+                break;
+            }
+        }
+    }
+
+    // For each (import, item), check usage in non-import lines.
+    let body: String = lines_owned
+        .iter()
+        .enumerate()
+        .filter_map(|(i, l)| {
+            if import_lines.contains(&(i as u32)) {
+                None
+            } else {
+                Some(l.clone())
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let mut unused: Vec<Value> = Vec::new();
+    let mut total_items = 0usize;
+    let mut skipped_wildcards = 0usize;
+    let mut skipped_reexports = 0usize;
+
+    for imp in &imports {
+        let is_reexport = imp.path.trim_start().starts_with("pub ");
+        for item in &imp.items {
+            total_items += 1;
+            if item.is_empty() || item == "*" || item == "_" {
+                skipped_wildcards += 1;
+                continue;
+            }
+            if is_reexport && !include_reexports {
+                skipped_reexports += 1;
+                continue;
+            }
+
+            // Word-boundary regex. regex::escape protects against names with
+            // weird chars (unlikely but cheap insurance).
+            let pattern = format!(r"\b{}\b", regex::escape(item));
+            let re = match Regex::new(&pattern) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+
+            if !re.is_match(&body) {
+                unused.push(json!({
+                    "name": item,
+                    "source": imp.path.clone(),
+                    "line": imp.line + 1, // 1-indexed for user-facing
+                }));
+            }
+        }
+    }
+
+    Ok(json!({
+        "file": file,
+        "language": lang_name,
+        "total_import_statements": imports.len(),
+        "total_items_checked": total_items,
+        "total_unused": unused.len(),
+        "skipped_wildcards": skipped_wildcards,
+        "skipped_reexports": skipped_reexports,
+        "unused_imports": unused,
+    }))
 }
 
 // === Helpers ===
@@ -929,6 +1219,110 @@ async fn resolve_callees(
         }
     }
     Ok(callees)
+}
+
+fn collect_imports(
+    tree: &tree_sitter::Tree,
+    content: &str,
+    lang: &str,
+) -> Result<Vec<(String, HashSet<String>)>> {
+    use tree_sitter::Query;
+    // Capture each import declaration at the granularity we want to filter on.
+    // For Go we use `import_spec` so multi-line `import (...)` blocks are split
+    // per package; everywhere else the whole statement is one unit.
+    let query_str = match lang {
+        "rust" => "(use_declaration) @import",
+        "typescript" | "javascript" => "(import_statement) @import",
+        "python" => "[(import_statement) (import_from_statement)] @import",
+        "go" => "(import_spec) @import",
+        _ => return Ok(Vec::new()),
+    };
+
+    let language = &crate::indexer::parser::LANG_MANAGER
+        .get_language(lang)
+        .expect("Lang not loaded")
+        .language;
+    let query = Query::new(language, query_str)
+        .map_err(|e| anyhow::anyhow!("Import query error: {}", e))?;
+
+    let mut cursor = tree_sitter::QueryCursor::new();
+    let mut matches = cursor.matches(&query, tree.root_node(), content.as_bytes());
+
+    let mut imports = Vec::new();
+    while let Some(match_) = matches.next() {
+        for capture in match_.captures {
+            let node = capture.node;
+            let text = match node.utf8_text(content.as_bytes()) {
+                Ok(t) => t.to_string(),
+                Err(_) => continue,
+            };
+            let mut names = collect_descendant_identifiers(&node, content);
+            // For `import "fmt"` (Go) the package name is the basename of the
+            // string literal and there are no identifier children to pick up.
+            if lang == "go" {
+                if let Some(path_node) = node.child_by_field_name("path") {
+                    if let Ok(raw) = path_node.utf8_text(content.as_bytes()) {
+                        let trimmed = raw.trim_matches('"');
+                        if let Some(last) = trimmed.rsplit('/').next() {
+                            if !last.is_empty() {
+                                names.insert(last.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            imports.push((text, names));
+        }
+    }
+    Ok(imports)
+}
+
+fn collect_function_identifiers(
+    function_node: &tree_sitter::Node<'_>,
+    content: &str,
+    _lang: &str,
+) -> Result<HashSet<String>> {
+    Ok(collect_descendant_identifiers(function_node, content))
+}
+
+/// Walk a node's subtree and collect every identifier-like token. Used by both
+/// import filtering (compute the set of names an import would introduce) and
+/// function-identifier collection (compute names actually referenced inside).
+fn collect_descendant_identifiers(node: &tree_sitter::Node<'_>, content: &str) -> HashSet<String> {
+    let mut names = HashSet::new();
+    let mut cursor = node.walk();
+    let mut stack: Vec<tree_sitter::Node<'_>> = node.children(&mut cursor).collect();
+    // Also consider the node itself if it's an identifier (rare but possible).
+    if is_identifier_kind(node.kind()) {
+        if let Ok(t) = node.utf8_text(content.as_bytes()) {
+            names.insert(t.to_string());
+        }
+    }
+    while let Some(n) = stack.pop() {
+        if is_identifier_kind(n.kind()) {
+            if let Ok(t) = n.utf8_text(content.as_bytes()) {
+                names.insert(t.to_string());
+            }
+        }
+        let mut c = n.walk();
+        for child in n.children(&mut c) {
+            stack.push(child);
+        }
+    }
+    names
+}
+
+fn is_identifier_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "identifier"
+            | "type_identifier"
+            | "field_identifier"
+            | "property_identifier"
+            | "shorthand_property_identifier"
+            | "package_identifier"
+            | "namespace_identifier"
+    )
 }
 
 fn is_primitive_type(type_name: &str, lang: &str) -> bool {

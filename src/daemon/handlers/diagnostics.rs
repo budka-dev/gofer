@@ -71,21 +71,76 @@ pub async fn tool_run_diagnostics(args: Value, ctx: &ToolContext) -> Result<Valu
             .map(String::from),
     };
 
+    let file_filter = args
+        .get("file")
+        .and_then(|v| v.as_str())
+        .map(|f| resolve_path(&ctx.root_path, f));
+
     let result = diagnostics::run_diagnostics(&ctx.root_path, &ctx.sqlite, options).await?;
 
-    // Each backend now reports its own status: ran/skipped/error. Folding
-    // skipped runs into the totals as 0/0 used to look like "no errors", which
-    // misled callers on monorepos without a root Cargo.toml.
+    let mut cargo_val = serde_json::to_value(&result.cargo)?;
+    let mut tsc_val = serde_json::to_value(&result.tsc)?;
+    let mut total_errors = result.total_errors;
+    let mut total_warnings = result.total_warnings;
+
+    if let Some(ref needle) = file_filter {
+        let (filtered_cargo, c_err, c_warn) = filter_diagnostics_by_file(&cargo_val, needle);
+        let (filtered_tsc, t_err, t_warn) = filter_diagnostics_by_file(&tsc_val, needle);
+        cargo_val = filtered_cargo;
+        tsc_val = filtered_tsc;
+        total_errors = c_err + t_err;
+        total_warnings = c_warn + t_warn;
+    }
+
     Ok(json!({
-        "cargo": serde_json::to_value(&result.cargo)?,
-        "tsc": serde_json::to_value(&result.tsc)?,
-        "total": { "errors": result.total_errors, "warnings": result.total_warnings }
+        "cargo": cargo_val,
+        "tsc": tsc_val,
+        "total": { "errors": total_errors, "warnings": total_warnings }
     }))
 }
 
-pub async fn tool_run_check(args: Value, ctx: &ToolContext) -> Result<Value> {
-    // Delegate to run_diagnostics — same logic, just a cleaner name
-    tool_run_diagnostics(args, ctx).await
+/// Return (filtered_value, errors_count, warnings_count) for diagnostics
+/// payload, keeping only entries whose `file` (or `file_path`) field contains
+/// `needle`. Unknown shapes are returned as-is with zero counts.
+fn filter_diagnostics_by_file(val: &Value, needle: &str) -> (Value, usize, usize) {
+    let Some(obj) = val.as_object() else {
+        return (val.clone(), 0, 0);
+    };
+    let mut out = serde_json::Map::new();
+    let mut errors = 0usize;
+    let mut warnings = 0usize;
+
+    for (k, v) in obj {
+        if k == "diagnostics" {
+            if let Some(arr) = v.as_array() {
+                let filtered: Vec<Value> = arr
+                    .iter()
+                    .filter(|d| {
+                        let path = d
+                            .get("file")
+                            .or_else(|| d.get("file_path"))
+                            .or_else(|| d.get("path"))
+                            .and_then(|p| p.as_str())
+                            .unwrap_or("");
+                        path.contains(needle)
+                    })
+                    .cloned()
+                    .collect();
+                for d in &filtered {
+                    match d.get("severity").and_then(|s| s.as_str()) {
+                        Some("error") => errors += 1,
+                        Some("warning") => warnings += 1,
+                        _ => {}
+                    }
+                }
+                out.insert(k.clone(), Value::Array(filtered));
+                continue;
+            }
+        }
+        out.insert(k.clone(), v.clone());
+    }
+
+    (Value::Object(out), errors, warnings)
 }
 
 pub async fn tool_health_check(ctx: &ToolContext) -> Result<Value> {

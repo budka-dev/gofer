@@ -1,6 +1,7 @@
 pub mod batch;
 pub mod cas_buffer;
 pub mod code_quality;
+pub mod complexity;
 pub mod common;
 pub mod diagnostics;
 pub mod file_ops;
@@ -12,6 +13,8 @@ pub mod project;
 pub mod lsp;
 pub mod sandbox;
 pub mod search;
+pub mod structural;
 pub mod symbols;
+pub mod unreachable;
 pub mod transactions;
 pub mod trash;

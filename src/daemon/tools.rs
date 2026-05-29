@@ -28,6 +28,9 @@ pub async fn dispatch(name: &str, args: Value, ctx: &ToolContext) -> Result<Valu
         "domain_stats" => project::tool_domain_stats(ctx).await,
 
         "search_by_purpose" => search::tool_search_by_purpose(args, ctx).await,
+        "structural_search" => structural::tool_structural_search(args, ctx).await,
+        "complexity" => complexity::tool_complexity(args, ctx).await,
+        "find_unreachable" => unreachable::tool_find_unreachable(args, ctx).await,
         "skeleton" => files::tool_skeleton(args, ctx).await,
         "verify_patch" => git::tool_verify_patch(args, ctx).await,
         "read_file" => files::tool_read_file(args, ctx).await,
@@ -35,7 +38,6 @@ pub async fn dispatch(name: &str, args: Value, ctx: &ToolContext) -> Result<Valu
         "search_symbols" => symbols::tool_search_symbols(args, ctx).await,
         "add_rule" => project::tool_add_rule(args, ctx).await,
         "mark_golden_sample" => project::tool_mark_golden_sample(args, ctx).await,
-        "run_check" => diagnostics::tool_run_check(args, ctx).await,
         "grep" => files::tool_grep(args, ctx).await,
         "find_files" => files::tool_find_files(args, ctx).await,
         "git_diff" => git::tool_git_diff(args, ctx).await,
@@ -50,7 +52,12 @@ pub async fn dispatch(name: &str, args: Value, ctx: &ToolContext) -> Result<Valu
         "symbol_exists" => symbols::tool_symbol_exists(args, ctx).await,
         "has_tests_for" => diagnostics::tool_has_tests_for(args, ctx).await,
         "is_exported" => symbols::tool_is_exported(args, ctx).await,
-        "has_documentation" => symbols::tool_has_documentation(args, ctx).await,
+        "find_unused_symbols" => symbols::tool_find_unused_symbols(args, ctx).await,
+        "find_unused_imports" => files::tool_find_unused_imports(args, ctx).await,
+        "find_by_type_signature" => symbols::tool_find_by_type_signature(args, ctx).await,
+        "find_implementations" => symbols::tool_find_implementations(args, ctx).await,
+        "call_path" => symbols::tool_call_path(args, ctx).await,
+        "dependency_subgraph" => symbols::tool_dependency_subgraph(args, ctx).await,
         "suggest_commit" => git::tool_suggest_commit(args, ctx).await,
         "get_cache_stats" => index::tool_get_cache_stats(ctx).await,
         "get_query_stats" => index::tool_get_query_stats(ctx).await,
@@ -66,13 +73,17 @@ pub async fn dispatch(name: &str, args: Value, ctx: &ToolContext) -> Result<Valu
         "append_to_file" => file_ops::tool_append_to_file(args, ctx).await,
         "create_directory" => file_ops::tool_create_directory(args, ctx).await,
         "move_file" => file_ops::tool_move_file(args, ctx).await,
-        "search_files" => file_ops::tool_search_files(args, ctx).await,
         // Trash management
         "delete_safe" => trash::tool_delete_safe(args, ctx).await,
         "list_trash" => trash::tool_list_trash(args, ctx).await,
         "restore" => trash::tool_restore(args, ctx).await,
         "purge_trash" => trash::tool_purge_trash(args, ctx).await,
-        // Atomic Transactions (Phase 2)
+        // Atomic Transactions (Phase 2) — multi-file operations with auto-rollback
+        "begin_transaction" => transactions::tool_begin_transaction(args, ctx).await,
+        "add_operation" => transactions::tool_add_operation(args, ctx).await,
+        "commit_transaction" => transactions::tool_commit_transaction(args, ctx).await,
+        "rollback_transaction" => transactions::tool_rollback_transaction(args, ctx).await,
+        "list_transactions" => transactions::tool_list_transactions(args, ctx).await,
         // Code Quality Tools (Phase 2)
         "format_file" => code_quality::tool_format_file(args, ctx).await,
         "lint_file" => code_quality::tool_lint_file(args, ctx).await,
@@ -193,14 +204,15 @@ pub fn core_tools_list() -> Vec<Value> {
         // }),
         json!({
             "name": "run_diagnostics",
-            "description": "Run cargo check and/or tsc to refresh compiler diagnostics. You can pass options for cargo check to target specific workspaces, packages, or all targets.",
+            "description": "Run cargo check and/or tsc to refresh compiler diagnostics. You can pass options for cargo check to target specific workspaces, packages, or all targets. Pass `file` to filter the diagnostics returned to a single file.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "workspace": { "type": "boolean", "description": "Check all packages in the workspace (cargo check --workspace)" },
                     "all_targets": { "type": "boolean", "description": "Check all targets (cargo check --all-targets) including tests and benches" },
                     "package": { "type": "string", "description": "Package to check (cargo check -p <package>)" },
-                    "manifest_path": { "type": "string", "description": "Path to Cargo.toml (cargo check --manifest-path <path>)" }
+                    "manifest_path": { "type": "string", "description": "Path to Cargo.toml (cargo check --manifest-path <path>)" },
+                    "file": { "type": "string", "description": "Only return diagnostics whose file path contains this string (relative to project root)" }
                 }
             }
         }),
@@ -254,6 +266,47 @@ pub fn core_tools_list() -> Vec<Value> {
                     "limit": { "type": "integer", "description": "Maximum results (default: 10)", "default": 10 }
                 },
                 "required": ["query"]
+            }
+        }),
+        json!({
+            "name": "structural_search",
+            "description": "Search code by AST shape, not regex. Use `preset` for curated patterns or `query` + `language` for a custom tree-sitter S-expression. Call without args to list all presets. Presets: Rust (rust_unwrap, rust_expect, rust_panic, rust_todo_unimplemented, rust_dbg, rust_println, rust_clone), TS/JS (ts_any, ts_console_log, ts_ts_ignore, ts_debugger, ts_non_null), Python (py_print, py_bare_except, py_breakpoint), Go (go_panic, go_fmt_print). Returns hits with file/line/col + matched text. Much more precise than grep — comments and strings are ignored; matches respect syntax.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "preset": { "type": "string", "description": "Catalog preset id (see description). Mutually exclusive with `query`." },
+                    "query": { "type": "string", "description": "Custom tree-sitter S-expression. Requires `language`. Use `@hit` capture to mark the node returned in results." },
+                    "language": { "type": "string", "description": "Target language (rust, typescript, python, go, ...). Required with `query`; optional filter with `preset`." },
+                    "path": { "type": "string", "description": "Subdirectory to search in (relative to project root)" },
+                    "max_results": { "type": "integer", "description": "Cap on returned hits (default 200, max 2000)", "default": 200 },
+                    "include_text": { "type": "boolean", "description": "Include the matched code snippet (truncated to 200 chars). Default: true.", "default": true }
+                }
+            }
+        }),
+        json!({
+            "name": "complexity",
+            "description": "Cyclomatic complexity + size metrics per function (McCabe: 1 + decision points). Counts branches (if/elif, match/switch arms, loops, except/catch), short-circuit operators (&&, ||, ??), and ternaries. Also reports line count, param count, max nesting depth. Use to find refactor candidates and likely bug sites. Ratings: 1-5 simple, 6-10 moderate, 11-20 complex, 21+ very_complex. Nested closures count toward the enclosing fn; nested named functions get their own entry.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "file": { "type": "string", "description": "Analyze a single file (relative path). Mutually exclusive with `path`." },
+                    "path": { "type": "string", "description": "Analyze all files under this subdirectory (default: whole project)" },
+                    "min_complexity": { "type": "integer", "description": "Only return functions with complexity >= this (default 1 = all)", "default": 1 },
+                    "sort": { "type": "string", "enum": ["complexity", "lines", "nesting", "name"], "description": "Sort order (default: complexity desc)", "default": "complexity" },
+                    "limit": { "type": "integer", "description": "Max functions to return (default 100, max 1000)", "default": 100 }
+                }
+            }
+        }),
+        json!({
+            "name": "find_unreachable",
+            "description": "Detect statically unreachable code: statements that follow an unconditional terminator (return / break / continue / throw / raise / panic!/unreachable!/todo!/unimplemented!) in the same block. Only direct siblings count — a `return` inside an `if` branch does NOT flag code after the `if` (that's reachable when the condition is false), so false positives are near zero. Out of scope: unreachable match arms after a catch-all, always-false conditions.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "file": { "type": "string", "description": "Analyze a single file (relative path). Mutually exclusive with `path`." },
+                    "path": { "type": "string", "description": "Analyze all files under this subdirectory (default: whole project)" },
+                    "limit": { "type": "integer", "description": "Max findings to return (default 200, max 2000)", "default": 200 }
+                }
             }
         }),
         json!({
@@ -331,15 +384,103 @@ pub fn core_tools_list() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "run_check",
-            "description": "Run compiler/linter checks (cargo check, tsc) and return fresh diagnostics without modifying any files.",
+            "name": "call_path",
+            "description": "BFS over symbol_references between two named symbols. `direction=calls` (default): paths where `from` transitively reaches `to` via outgoing calls. `direction=called_by`: paths where `from` is reached by walking incoming references from `to`. Returns shortest paths rendered as `from → ... → to`. Use `file_from`/`file_to` to disambiguate when names collide. Caveats: dyn/trait dispatch isn't tracked; unresolved refs fan out via name lookup (occasional false branches).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "workspace": { "type": "boolean", "description": "Check all packages in the workspace (cargo check --workspace)" },
-                    "all_targets": { "type": "boolean", "description": "Check all targets (cargo check --all-targets) including tests and benches" },
-                    "package": { "type": "string", "description": "Package to check (cargo check -p <package>)" },
-                    "manifest_path": { "type": "string", "description": "Path to Cargo.toml (cargo check --manifest-path <path>)" }
+                    "from": { "type": "string", "description": "Source symbol name" },
+                    "to": { "type": "string", "description": "Target symbol name" },
+                    "direction": {
+                        "type": "string",
+                        "enum": ["calls", "called_by"],
+                        "description": "calls = walk outgoing edges; called_by = walk incoming edges",
+                        "default": "calls"
+                    },
+                    "file_from": { "type": "string", "description": "Disambiguate `from` by file path (optional)" },
+                    "file_to": { "type": "string", "description": "Disambiguate `to` by file path (optional)" },
+                    "max_depth": { "type": "integer", "description": "BFS depth cap (default 8, max 30)", "default": 8 },
+                    "max_paths": { "type": "integer", "description": "Max distinct paths to return (default 5, max 50)", "default": 5 }
+                },
+                "required": ["from", "to"]
+            }
+        }),
+        json!({
+            "name": "dependency_subgraph",
+            "description": "Dependency neighbourhood around a symbol via BFS over symbol_references. `direction=out` (default): what the symbol depends on; `in`: what depends on it; `both`: union. Returns nodes + edges within `max_depth`, bounded by `max_nodes`. Unlike call_path (path to a target), this is the whole reachable subgraph — good for impact analysis and understanding a symbol's blast radius. Caveats: dyn/trait dispatch not tracked; only resolved references are followed.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "symbol": { "type": "string", "description": "Center symbol name" },
+                    "file": { "type": "string", "description": "Disambiguate by file path (optional)" },
+                    "direction": {
+                        "type": "string",
+                        "enum": ["out", "in", "both"],
+                        "description": "out = dependencies; in = dependents; both = union",
+                        "default": "out"
+                    },
+                    "max_depth": { "type": "integer", "description": "BFS depth (default 3, max 20)", "default": 3 },
+                    "max_nodes": { "type": "integer", "description": "Node cap (default 50, max 500)", "default": 50 }
+                },
+                "required": ["symbol"]
+            }
+        }),
+        json!({
+            "name": "find_implementations",
+            "description": "Find implementations of a trait / interface / base class by name, across languages. Rust: `impl <Name> for <Type>` blocks (the trait position only — the implementing type doesn't false-match). TS/JS: `class X implements <Name>` and `class X extends <Name>`. Python: `class X(<Name>)` base classes. Whole-token matching (`Foo` won't match `FooBar`). Go is NOT supported — interface satisfaction is structural (method sets), not declared. Needs re-indexed signatures.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Trait / interface / base class name to find implementors of" },
+                    "limit": { "type": "integer", "description": "Max results (default 100, max 500)", "default": 100 }
+                },
+                "required": ["name"]
+            }
+        }),
+        json!({
+            "name": "find_unused_imports",
+            "description": "Find imports in a file whose local binding is never used in the rest of the file. Parses imports via tree-sitter, then word-boundary matches each local binding against non-import lines. Skips wildcards (`use foo::*`, `from foo import *`) and `pub use` re-exports (use `include_reexports=true` to include them). Caveats: false positives on macros only referenced by name through `paste!` / `concat_idents!`; false negatives if a binding has the same name as a method called on an unrelated type.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "file": { "type": "string", "description": "File path relative to project root" },
+                    "include_reexports": {
+                        "type": "boolean",
+                        "description": "Include `pub use` (Rust) — by default re-exports are skipped because they may be consumed from outside the file.",
+                        "default": false
+                    }
+                },
+                "required": ["file"]
+            }
+        }),
+        json!({
+            "name": "find_by_type_signature",
+            "description": "Find functions/methods by type signature — region-aware. `returns` matches the return-type region only (so it won't false-match params), `param_type` matches the parameter region only, `signature_contains` is a raw substring over the whole signature. Case-sensitive substrings, so `Result<MyType` matches `Result<MyType, Error>` and `&mut Conn` matches `&mut Connection`. At least one filter required. Caveats: Go method receivers count as a param; Rust where-clauses bleed into the return region; needs re-indexed signatures.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "returns": { "type": "string", "description": "Substring the return type must contain (e.g. 'Result<', 'Promise<void>', 'error')" },
+                    "param_type": { "type": "string", "description": "Substring a parameter type must contain (e.g. '&mut Connection', ': number')" },
+                    "signature_contains": { "type": "string", "description": "Raw substring anywhere in the signature (fallback for generics/lifetimes/where-clauses)" },
+                    "kind": { "type": "string", "description": "Restrict to one kind (function/method). Default: both." },
+                    "file": { "type": "string", "description": "Restrict to files whose path contains this substring" },
+                    "limit": { "type": "integer", "description": "Max results (default 100, max 500)", "default": 100 }
+                }
+            }
+        }),
+        json!({
+            "name": "find_unused_symbols",
+            "description": "Find symbols with no incoming `call`/`usage`/`inherit`/`type_usage` references — dead-code candidates. Walks the symbol_references graph (both resolved by id and unresolved by name) and applies cleanup heuristics: tests/benches by path AND by attribute, entry points by name, FFI/wasm/Python exports by signature attributes. Caveats: the graph is language-agnostic. Attribute/decorator filtering works for Rust (#[test], #[wasm_bindgen]), Python (@pytest.fixture) and TS (@Component) — decorators are now captured into the signature. Go has no attribute markers (path+naming only). External consumers of public API aren't visible (use `public_only=false`); trait/dyn dispatch isn't tracked (false positives on trait impl methods); attribute filtering requires re-indexed data — old indexes need `force_reindex`.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "kind": { "type": "string", "description": "Restrict to one symbol kind. Default: all meaningful kinds (function, method, struct, enum, trait, interface, class, const, type, type_alias)." },
+                    "file": { "type": "string", "description": "Restrict to files whose path contains this substring (relative to project root)" },
+                    "public_only": { "type": "boolean", "description": "Only consider symbols whose signature starts with `pub`/`export` (or whose name doesn't start with `_`). Default: true.", "default": true },
+                    "exclude_tests": { "type": "boolean", "description": "Skip test files by path (tests/, test/, __tests__/, benches/, *.test.*, *.spec.*, *_test.*) AND by attribute in signature (#[test], #[tokio::test], #[bench], #[cfg(test)], @pytest.fixture, @pytest.mark) AND by naming convention (test_*, *_test). Default: true.", "default": true },
+                    "exclude_entry_points": { "type": "boolean", "description": "Skip symbols named `main`, `__main__`, `lambda_handler`, `handler` — typical CLI/Lambda entry points. Default: true.", "default": true },
+                    "exclude_exports": { "type": "boolean", "description": "Skip symbols whose signature contains FFI/wasm/Python/Node export markers: #[no_mangle], extern \"C\", #[wasm_bindgen], #[pyfunction], #[napi], @customElement, @Component, #[export_name]. Default: true.", "default": true },
+                    "limit": { "type": "integer", "description": "Max symbols to return (default 100, max 500)", "default": 100 }
                 }
             }
         }),
@@ -351,8 +492,9 @@ pub fn core_tools_list() -> Vec<Value> {
                 "properties": {
                     "pattern": { "type": "string", "description": "Regex pattern to search for" },
                     "path": { "type": "string", "description": "Subdirectory to search in (relative to project root)" },
-                    "glob": { "type": "string", "description": "File filter glob (e.g., '*.rs', '*.{ts,tsx}')" },
+                    "glob": { "type": "string", "description": "File filter glob — only simple `*.<ext>` is supported" },
                     "case_insensitive": { "type": "boolean", "description": "Case-insensitive search (default: false)" },
+                    "context_lines": { "type": "integer", "description": "Number of context lines before/after match (default: 0)", "default": 0 },
                     "max_results": { "type": "integer", "description": "Max matches (default: 100)", "default": 100 }
                 },
                 "required": ["pattern"]
@@ -750,42 +892,66 @@ pub fn core_tools_list() -> Vec<Value> {
                 "required": ["source", "destination"]
             }
         }),
+        // Atomic Transactions (Phase 2) — multi-file operations with auto-rollback
         json!({
-            "name": "search_files",
-            "description": "Regex-based full-text search across files. Returns a token-optimized map of matching strings clustered by file. Similar to grep but with optional context lines.",
+            "name": "begin_transaction",
+            "description": "Open a new transaction. Subsequent add_operation/commit_transaction/rollback_transaction calls reference its `transaction_id`. State lives in the daemon process and is lost on restart.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "regex_pattern": {
-                        "type": "string",
-                        "description": "Regex pattern to search for"
-                    },
-                    "directory": {
-                        "type": "string",
-                        "description": "Directory to search in (default: project root)"
-                    },
-                    "file_extension": {
-                        "type": "string",
-                        "description": "Filter by file extension (e.g., 'rs', 'ts')"
-                    },
-                    "context_lines": {
-                        "type": "integer",
-                        "description": "Number of context lines before/after match",
-                        "default": 0
-                    },
-                    "case_insensitive": {
-                        "type": "boolean",
-                        "description": "Case-insensitive search",
-                        "default": false
-                    },
-                    "max_results": {
-                        "type": "integer",
-                        "description": "Maximum results to return",
-                        "default": 100
+                    "transaction_id": { "type": "string", "description": "Optional id. If omitted, a UUID is generated." }
+                }
+            }
+        }),
+        json!({
+            "name": "add_operation",
+            "description": "Stage an operation in an open transaction. Supported `operation.type`: patch_file, write_file, append_to_file, delete_safe, move_file, create_directory. Each staged operation is validated (basic syntax + conflicts).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "transaction_id": { "type": "string", "description": "Id from begin_transaction" },
+                    "operation": {
+                        "type": "object",
+                        "description": "{type: <op>, params: {...}}",
+                        "properties": {
+                            "type": {
+                                "type": "string",
+                                "enum": ["patch_file", "write_file", "append_to_file", "delete_safe", "move_file", "create_directory"]
+                            },
+                            "params": { "type": "object", "description": "Same arguments shape as the corresponding standalone tool" }
+                        },
+                        "required": ["type", "params"]
                     }
                 },
-                "required": ["regex_pattern"]
+                "required": ["transaction_id", "operation"]
             }
+        }),
+        json!({
+            "name": "commit_transaction",
+            "description": "Snapshot all affected files, apply staged operations one by one. On any failure, all already-applied operations are rolled back from snapshots and the transaction is marked failed.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "transaction_id": { "type": "string", "description": "Id from begin_transaction" }
+                },
+                "required": ["transaction_id"]
+            }
+        }),
+        json!({
+            "name": "rollback_transaction",
+            "description": "Discard all staged operations and mark the transaction rolled_back. No-op if already committed/failed.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "transaction_id": { "type": "string", "description": "Id from begin_transaction" }
+                },
+                "required": ["transaction_id"]
+            }
+        }),
+        json!({
+            "name": "list_transactions",
+            "description": "List all transactions held in process memory with their status and operations count.",
+            "inputSchema": { "type": "object", "properties": {} }
         }),
         // Trash management (safe deletion with recovery)
         json!({
