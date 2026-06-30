@@ -122,7 +122,7 @@ pub async fn count_errors(&self) -> Result<(i64, i64)>   // (errors, warnings)
 pub async fn get_errors(...) -> Result<Vec<ActiveError>> // пагинированный
 ```
 
-Кеш `run_check`/`run_diagnostics`. `clear_*` зовётся перед свежим прогоном, `insert_error` — в цикле по выводу компилятора.
+Кеш компиляторных диагностик. Таблица сохранена в схеме SQLite, но инструменты записи в неё не входят в текущий read-only MCP-API.
 
 ### Конфиг-ключи
 

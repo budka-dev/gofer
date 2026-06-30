@@ -1,5 +1,7 @@
 # Аудит инструментов и техническая roadmap
 
+> **Обновлено: 2026-06-30.** В ходе рефакторинга на read-only модель из gofer удалены: мутации файлов (write_file/patch_file и др.), sandbox, транзакции, CAS-буфер (clipboard_*), корзина (trash), code quality (lint/format), весь LSP-слой и язык-специфичные инструменты. Текущий каталог — в [tools-reference.md](tools-reference.md). Документ ниже отражает анализ **до** этого рефакторинга (2026-05-28) и **не** является авторитетным описанием актуального API.
+
 Срез по состоянию **2026-05-28**. Цель документа — оценить целесообразность существующего набора MCP-инструментов и зафиксировать критические пробелы для **технической** работы агента (поиск, навигация, дебаг). Инструменты планирования, knowledge management и продуктовые обвязки сюда **не входят**.
 
 Привязки к коду точечные — если рефакторили `src/`, проверь актуальность.
@@ -51,7 +53,7 @@
 |---|---|
 | ~~`has_documentation`~~ | ✅ **Удалён** — возвращал всегда `has_docs: false`. Если когда-то понадобится — реализовать через распарсинг doc-комментов в индексе с флагом на `Symbol`, а не заглушкой. |
 | `has_tests_for` (`diagnostics.rs:190+`) | Path-matching по шаблонам (`*.test.ts`, `_test.rs`, …). Не использует индекс. Заменить на `find_tests_for(symbol)` через поиск тестов, импортирующих/вызывающих символ. |
-| Транзакции (`begin_transaction`, `add_operation`, `commit_transaction`, `rollback_transaction`, `list_transactions`) | ✅ **Зарегистрированы в dispatch + JSON-Schema.** Handlers в `handlers/transactions.rs` со снапшотами и автооткатом. |
+| Транзакции (`begin_transaction`, `add_operation`, `commit_transaction`, `rollback_transaction`, `list_transactions`) | ~~✅ Зарегистрированы в dispatch~~ → **удалены** в ходе рефакторинга на read-only модель. |
 
 ### 1.3 Вне технического скоупа
 
@@ -73,9 +75,9 @@
 | `get_references` / `get_callers` / `lsp_find_references` | Первые два — на SQLite (`symbols.rs:122–138, 185–207`), причём `get_callers` — строгий подмножественный фильтр `ref_kind ∈ {call, usage}` от `get_references`. Третий — LSP, требует line/character. | Оставить **два** уровня: `references(symbol, kind?)` поверх SQLite (фильтр кинда — параметр) и `lsp_find_references` для точных позиций. |
 | `run_diagnostics` / `lsp_diagnostics` / `check_code` (после слияния) | Три источника диагностики: cargo/tsc один-раз, live LSP, lint. | Этот разрыв обоснован — оставить, но в описаниях явно проговорить «когда какой». Сейчас агент гадает. |
 
-### 1.5 Дубли, обусловленные архитектурой (не трогать)
+### 1.5 Дубли, обусловленные архитектурой
 
-`rust_goto_definition`, `rust_find_references`, `rust_hover`, `rust_diagnostics`, `rust_completions`, `rust_inlay_hints`, `rust_code_actions` (`languages/rust.rs:265–302`) — буквально вызывают одноимённые `lsp_*` и сериализуют через `to_string_pretty`. Это **не баг**: они доступны через `lang_tools_call`, экономят место в основном `tools/list`. Оставить.
+> **Исторически:** `rust_goto_definition`, `rust_find_references` и другие LSP-обёртки были реализованы как тонкие прокси поверх `lsp_*`. Весь этот слой (LSP-инструменты + lang_tools_call) **удалён** при рефакторинге на read-only модель.
 
 ## 2. Что укрупнить
 

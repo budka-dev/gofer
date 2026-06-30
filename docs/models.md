@@ -204,7 +204,7 @@ struct GoldenSample {
 }
 ```
 
-Используются для впрыска контекста в LLM (`project://context` ресурс). `add_rule` пишет в `rules`; `mark_golden_sample` — в `golden_samples`.
+Хранятся в SQLite и отдаются через MCP-ресурс `project://context` при чтении. Могут быть заполнены внешними инструментами напрямую через SQLite.
 
 ## Конфиг-ключи
 
@@ -313,7 +313,7 @@ struct ActiveError {
 }
 ```
 
-Кеш компиляторных диагностик из `run_diagnostics`/`run_check`. Очищается при следующем прогоне.
+Кеш компиляторных диагностик (таблица сохранена в схеме, но инструменты записи в неё не входят в текущий read-only API).
 
 ## ProjectContext
 

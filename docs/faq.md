@@ -6,15 +6,15 @@
 
 ### Зачем нужен gofer, если есть LSP?
 
-LSP даёт точную навигацию, но в API ассистента-чат-агента он умеет только определённый набор вещей (definition, references, hover). gofer добавляет:
+LSP — это навигация на уровне одного файла/позиции, требующая запущенного language server. gofer добавляет принципиально другое:
 
 - Семантический поиск по индексу (то, что LSP не умеет в принципе).
 - Token-эффективные read-операции (`skeleton`, `read_function_context`, `read_types_only`).
+- Граф вызовов и символов поверх SQLite — быстро, без LSP.
 - Batch-запросы и серверный кеш.
-- CAS-буфер для безопасного копирования кода.
-- Cross-language: один сервер обслуживает Rust + TypeScript + Vue + Python в монорепо.
+- Язык-агностичность: один сервер обслуживает Rust + TypeScript + Vue + Python в монорепо без LSP-серверов.
 
-LSP остаётся доступен через gofer'овские `lsp_*` инструменты — это **дополнение**, а не замена.
+gofer не содержит LSP-инструментов. Если нужна LSP-навигация — используй встроенные средства IDE или MCP-сервер на базе rust-analyzer/pyright напрямую.
 
 ### Зачем нужен gofer, если есть ripgrep?
 
@@ -95,7 +95,7 @@ gofer reindex
 gofer status
 ```
 
-Но полный набор инструментов (skeleton, read_function_context, batch, CAS-буфер) доступен только через MCP. CLI закрывает базовые сценарии.
+Но полный набор инструментов (skeleton, read_function_context, batch, structural_search и т. д.) доступен только через MCP. CLI закрывает базовые сценарии.
 
 ### Можно ли вызывать gofer из скриптов?
 
@@ -158,19 +158,13 @@ gofer не учит — он индексирует. Учится эмбедде
 
 ### Поддерживается работа без эмбеддера?
 
-Частично. Без эмбеддера отвалится `search`, `search_by_purpose`, `smart_file_selection` (всё, что использует векторы). Работают: `grep`, `find_files`, `read_*`, `skeleton`, `get_symbols`, `get_callers/callees`, все `lsp_*`, sandbox, git, code-quality.
+Частично. Без эмбеддера отвалится `search`, `search_by_purpose`, `smart_file_selection` (всё, что использует векторы). Работают: `grep`, `find_files`, `read_*`, `skeleton`, `get_symbols`, `get_callers`/`get_callees`, `structural_search`, git-инструменты.
 
 ### Что с private-keys и секретами в индексе?
 
 gofer индексирует **все** файлы, не отфильтрованные `.gitignore` или `[indexer].ignore`. Если у тебя в репо лежит `.env` с реальными секретами — он попадёт в `index.sqlite` и `lance/`. Эмбеддинги текстов уйдут на эмбеддер. **Это твоя ответственность** — не индексировать секреты.
 
 Стандартный приём: положи `.env*`, `secrets/`, `*.pem` в `.gitignore` или `[indexer].ignore`.
-
-### Sandbox — это безопасно?
-
-Нет, в строгом смысле — нет (см. [architecture.md#sandbox](architecture.md#sandbox)). `execute_code` запускает дочерний процесс через системный интерпретатор без cgroups/seccomp/namespaces. Подразумевается, что код доверенный (ассистент, работающий в управляемой среде разработчика).
-
-Если нужна настоящая изоляция — оборачивай вызовы в Firejail/Docker/Nsjail на стороне MCP-клиента или патчь sandbox-handler.
 
 ## Сообщество и поддержка
 

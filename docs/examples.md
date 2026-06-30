@@ -81,67 +81,21 @@ read_function_context file="src/daemon/tools.rs" function="dispatch" include_cal
    → сам pipeline.rs полностью, его import-зависимости в виде скелетов
 ```
 
-## Сценарий 3. Поправить баг через patch_file
-
-**Задача:** в `src/indexer/embedder.rs` нужно поменять таймаут с 60 с на 30 с.
-
-Наивный путь — прочитать файл, сгенерировать целиком новый, вызвать `write_file`. Дорого по токенам и рискованно (можно нагаллюцинировать).
-
-**Эффективный путь:**
-
-```
-1. grep pattern="timeout(std::time::Duration::from_secs" path="src/indexer/embedder.rs"
-   → src/indexer/embedder.rs:27: .timeout(std::time::Duration::from_secs(60))
-
-2. patch_file
-   path="src/indexer/embedder.rs"
-   search_string=".timeout(std::time::Duration::from_secs(60))"
-   replace_string=".timeout(std::time::Duration::from_secs(30))"
-
-3. verify_patch (опционально — прогонит cargo check на изменённой версии без коммита)
-```
-
-`patch_file` обновляет ровно тот фрагмент, ничего больше.
-
-## Сценарий 4. Найти, кто вызывает функцию
+## Сценарий 3. Найти, кто вызывает функцию
 
 **Задача:** хочешь зарефакторить `EmbedderPool::embed`, но боишься сломать вызывающих.
 
 ```
 1. get_callers symbol="embed"
    → список всех файлов и строк с вызовами
-   
-2. (опционально, точнее) lsp_find_references
-   file_path="src/indexer/embedder.rs" line=197 character=14
-   → LSP-точный список через rust-analyzer
+
+2. (для точного blast-radius) dependency_subgraph symbol="embed" direction="in"
+   → BFS-граф входящих зависимостей с глубиной до N уровней
 ```
 
-`get_callers` работает из индекса (быстро, токено-экономно). `lsp_find_references` — авторитативный, но требует поднятого LSP.
+`get_callers` работает из индекса (быстро, токено-экономно). `dependency_subgraph` строит более полную картину для сложных случаев.
 
-## Сценарий 5. Сэкономить токены через CAS-буфер
-
-**Задача:** ассистент сгенерировал большой блок кода и хочет вставить его в три разных места. Наивно — отправить 3 раза. С CAS-буфером — один раз сохранить, три раза процитировать по hash.
-
-```
-1. clipboard_store_text content="<big code block>"
-   → возвращает hash_id, например "ab12cd34"
-
-2. clipboard_paste path="src/a.rs" line_number=42 hash_id="ab12cd34"
-3. clipboard_paste path="src/b.rs" line_number=10 hash_id="ab12cd34"
-4. clipboard_paste path="src/c.rs" line_number=99 hash_id="ab12cd34"
-```
-
-Аналогично можно «вырезать» блок из одного места и «вставить» в другое:
-
-```
-1. clipboard_copy path="src/old.rs" start_line=50 end_line=120 cut=true
-   → возвращает hash_id, блок удалён из old.rs
-2. clipboard_paste path="src/new.rs" line_number=10 hash_id="<hash>"
-```
-
-`clipboard_list` покажет, что сейчас лежит в буфере (буферы живут в памяти демона до явной очистки или рестарта).
-
-## Сценарий 6. Сделать N запросов за один round-trip
+## Сценарий 4. Сделать N запросов за один round-trip
 
 **Задача:** ассистент хочет получить структуру файла, прочитать конкретный фрагмент и поискать упоминания одной строки. Это 3 отдельных вызова MCP.
 
@@ -161,7 +115,7 @@ batch_operations operations=[
 - `summary_only=true` — отдать только статусы (полезно для health-чека).
 - `max_chars_per_op=8000` — резать каждый ответ, чтобы не разорвать контекст.
 
-## Сценарий 7. Smart-коммит
+## Сценарий 5. Smart-коммит
 
 **Задача:** ассистент готов закоммитить N изменённых файлов и хочет нормальное сообщение.
 
@@ -174,7 +128,7 @@ batch_operations operations=[
 
 `suggest_commit` смотрит diff staged + unstaged, анализирует, что добавлено/удалено/изменено, и предлагает заголовок + тело в Conventional Commits.
 
-## Сценарий 8. Только типы из файла
+## Сценарий 6. Только типы из файла
 
 **Задача:** нужно понять модель данных модуля, не залезая в логику.
 
@@ -186,7 +140,7 @@ read_types_only file="src/daemon/state.rs"
 
 Сильно дешевле, чем `read_file`, и точнее, чем `skeleton` (в skeleton сигнатуры функций тоже остаются).
 
-## Сценарий 9. «Какие файлы важны для задачи X»
+## Сценарий 7. «Какие файлы важны для задачи X»
 
 **Задача:** ассистент не знает, с чего начать. Хочет ранжированный список релевантных файлов.
 
@@ -201,50 +155,49 @@ smart_file_selection
 
 Параметр `boost_recency` (0..1) добавляет вес недавним правкам — полезно, если задача касается активной разработки.
 
-## Сценарий 10. Полная диагностика проекта
+## Сценарий 8. Полная диагностика проекта
 
 Когда что-то «не так» и непонятно где:
 
 ```
 1. get_index_status           # completeness, число файлов/чанков
 2. validate_index             # расхождения диск ↔ SQLite
-3. health_check               # sqlite/lance/embedder/lsp
+3. health_check               # sqlite/lance/embedder
 4. get_cache_stats            # hit-rate серверного LRU
 5. get_query_stats            # latency поиска
 ```
 
 Если `validate_index` показывает несоответствия — `force_reindex scope=project` восстанавливает консистентность. Снос диска (`rm -rf .gofer/data/`) — последняя инстанция.
 
-## Сценарий 11. Vue-проект
+## Сценарий 9. Структурный поиск по AST-паттернам
 
-Vue — частый случай, потому что Volar требует точного подхода.
-
-```
-1. lang_tools_list lang="vue"
-   → список: vue_get_meta, vue_read_section, vue_find_usages,
-     vue_resolve_component, vue_router_map, vue_pinia_stores
-
-2. lang_tools_call tool="vue_get_meta" args={"file": "src/components/Button.vue"}
-   → props, emits, slots компонента
-
-3. lang_tools_call tool="vue_router_map" args={}
-   → URL → компонент маппинг проекта
-
-4. lang_tools_call tool="vue_pinia_stores" args={}
-   → все defineStore с state/actions
-```
-
-## Сценарий 12. Rust макросы
+**Задача:** найти все вызовы `.unwrap()` в Rust-коде без ложных срабатываний из комментариев и строк.
 
 ```
-1. read_file src/storage/sqlite.rs start_line=1 end_line=30
-   → видишь #[derive(...)], sqlx::query!, и хочешь понять что они разворачивают
+1. structural_search preset="rust_unwrap" path="src/"
+   → только реальные .unwrap() вызовы, без false positives из комментариев
 
-2. lang_tools_call tool="rust_expand_macro" args={"item_name": "MyStruct"}
-   → cargo expand на конкретный item
+2. structural_search preset="rust_todo_unimplemented"
+   → todo!() и unimplemented!() по всему проекту
 
-3. lsp_expand_macro file_path="src/storage/sqlite.rs" line=42 character=8
-   → разворот через rust-analyzer
+3. structural_search query="(call_expression
+     function: (field_expression field: (field_identifier) @name
+       (#eq? @name \"unwrap\")))" language="rust"
+   → custom S-expression, то же, но полностью под твой контроль
+```
+
+`structural_search` в разы точнее `grep` — работает на уровне AST, а не текста.
+
+## Сценарий 10. Поиск реализаций trait/interface
+
+**Задача:** найти все типы, реализующие `EmbedderTrait`.
+
+```
+1. find_implementations name="EmbedderTrait"
+   → list всех Rust impl, TS implements, Python базовых классов
+
+2. (для более широкого контекста) search "impl EmbedderTrait"
+   → семантический поиск в окрестности
 ```
 
 ## Анти-паттерны
@@ -252,7 +205,6 @@ Vue — частый случай, потому что Volar требует то
 Чего стоит избегать:
 
 - **`read_file` для целого файла >300 строк, если не нужны все детали.** Используй `skeleton` / `read_function_context` / `read_types_only`.
-- **`write_file` для правок.** Это перезапись целиком и потеря diff'а. Используй `patch_file`.
 - **`search` без `min_score`.** Низкокачественные совпадения с score 0.1 будут мусорить контекст.
 - **Сериализация инструментов, когда можно параллелить.** `batch_operations` экономит latency.
 - **Игнорирование `get_index_status` перед поиском после крупного git pull.** Индекс может быть устаревшим, watcher отрабатывает не мгновенно.

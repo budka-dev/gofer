@@ -6,7 +6,7 @@
 
 - Rust toolchain — `1.93.0` подтверждён, минимум stable ≥ 1.90.
 - Системные библиотеки: `git2` тянет libgit2 (либо сборку из исходников, либо системный pkg-config), `lancedb` — Apache Arrow C++, `reqwest` с rustls — OpenSSL не нужен.
-- Опционально для разработки: `sqlx-cli` для миграций offline, `cargo-expand` для тестов `lsp_expand_macro`, `cargo-clippy`.
+- Опционально для разработки: `sqlx-cli` для миграций offline, `cargo-expand` для инспекции макросов, `cargo-clippy`.
 - Запущенный HTTP-эмбеддер для интеграционных прогонов (см. `[embedding].external_url`).
 
 ## Сборка
@@ -69,8 +69,7 @@ Pre-commit hook'и сейчас не настроены — соблюдай р�
 | Новый MCP-инструмент в core-list | `src/daemon/handlers/<group>.rs` + ветка в `src/daemon/tools.rs::dispatch` + JSON-Schema в `core_tools_list` |
 | Новый CLI-флаг/команду | `src/main.rs::Commands` + соответствующий `handle_*` |
 | Новый JSON-RPC метод (`daemon/*`, не tool) | `src/ipc/server.rs::handle_request` + конкретный `handle_*` |
-| Новый language-tool | `src/languages/<lang>.rs::tools()` + `call_tool()` |
-| Поддержку нового языка | новый файл в `src/languages/` + регистрация в `LanguageService` |
+| Поддержку нового языка (парсинг) | новый файл в `src/languages/` (если нужна Vue-специфика) или добавить грамматику через lang-hub |
 | Новую миграцию схемы | `migrations/018_*.sql` (см. ниже) |
 | Новое поле в индексе | модель в `src/models/` + миграция + апдейт `indexer/pipeline.rs` |
 | Новое поле в hot scoring | `src/scoring_index.rs::FileScoringData` + бамп `version` |
@@ -95,12 +94,6 @@ Pre-commit hook'и сейчас не настроены — соблюдай р�
 ### Возврат данных
 
 Возвращай `Value` — он попадёт в MCP-content как `text` (JSON-stringified). Старайся возвращать токен-оптимизированные структуры: плоские массивы строк или карты, группированные по файлу. Длинные тексты — режь `max_chars_per_op`-стилем, оставляя поля вроде `truncated: true`/`full_chars: N`.
-
-## Добавление language-tool
-
-В `src/languages/<lang>.rs::tools()` добавь `ToolDefinition { name, description, input_schema }`. В `call_tool()` добавь ветку `"my_lang_tool" => self.my_impl(args, root).await`.
-
-`lang_tools_list` подберёт его автоматически — отдельной регистрации в `dispatch` не нужно.
 
 ## Добавление миграции SQLite
 

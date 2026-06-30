@@ -36,7 +36,7 @@
    curl -X POST http://127.0.0.1:8080/embed/ -d '{"texts":["test"]}' -H 'content-type: application/json'
    ```
 2. После пяти подряд ошибок `embedding_circuit` размыкается на 30 с (`src/error_recovery.rs`, конфиг в `daemon/state.rs:248`). После восстановления сервиса жди до 30 с, пока цепь сама не перейдёт в HalfOpen и не закроется.
-3. Поиск без эмбеддера: `search` отвалится. `grep`, `find_files`, `read_file`, `get_symbols`, `lsp_*` — работают, они не ходят в эмбеддер.
+3. Поиск без эмбеддера: `search` отвалится. `grep`, `find_files`, `read_file`, `get_symbols`, `structural_search`, git-инструменты — работают, они не ходят в эмбеддер.
 
 ## Индекс «битый» или неполный
 
@@ -79,19 +79,6 @@
    Долговременно — в `/etc/sysctl.d/`.
 4. Если watcher не стартовал вообще, в `daemon.log` будет `Failed to watch dir: <path>: <error>`. Проверь права.
 
-## LSP-инструменты не отвечают
-
-**Симптом:** `lsp_goto_definition` (и др.) возвращают пустой результат или ошибку.
-
-1. LSP-сервер для языка должен быть в `$PATH`. Проверь:
-   - Rust: `rust-analyzer --version`
-   - TypeScript: `typescript-language-server --version`
-   - Vue: `vue-language-server` (Volar) или `vls`
-   - Python: `pyright-langserver --version` либо `pylsp`
-   - Go: `gopls version`
-2. gofer поднимает LSP лениво при первом запросе для файла. В `daemon.log` ищи `Starting LSP for <lang>: <cmd>` — если команда не найдена, увидишь ошибку.
-3. Для не-стандартного LSP пропиши команду через `generic_lsp` (см. `src/languages/generic_lsp.rs`).
-
 ## `search` отдаёт ерунду / низкие score
 
 1. Проверь, что эмбеддер тот же, что был при индексации. Смена модели = инвалидация кеша через `cache_version_key`. Если переехал на другой эмбеддер — сделай `gofer reindex --force`.
@@ -104,7 +91,7 @@
 Имя инструмента ушло мимо `dispatch`. Возможные причины:
 
 - Опечатка в имени (`get_symbols` ≠ `get_symbol`).
-- Инструмент существует в handler, но не зарегистрирован в `dispatch` (например, группа transactions — см. [tools-reference.md](tools-reference.md#транзакции-atomic-multi-file-ops)).
+- Инструмент существует в handler, но не зарегистрирован в `dispatch` — проверь `src/daemon/tools.rs::dispatch`.
 - Старый MCP-клиент кеширует `tools/list`. Перезапусти клиент или вызови `tools/list` снова.
 
 ## `tools/call` отвечает `-32602 Invalid params`
@@ -124,7 +111,7 @@
 
 ## Не подхватывается язык
 
-**Симптом:** `gofer install-lang <name>` падает или язык в `lang_tools_list` не виден.
+**Симптом:** `gofer install-lang <name>` падает или язык не используется при индексации.
 
 1. Имя должно совпадать с папкой в lang-hub репозитории. Проверь там перечень.
 2. После установки грамматика лежит в `~/.gofer/langs/<name>/`. Если файл `.wasm` есть, но парсер не подключается — посмотри `daemon.log` на `wasm ABI version mismatch`. Это значит, что версия грамматики не совпадает с tree-sitter в gofer. См. коммит `d99d62e` про мягкую обработку этой ошибки.

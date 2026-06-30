@@ -40,7 +40,7 @@ gofer — это один бинарь с несколькими режимам�
 | `indexer/` | Пайплайн индексации, watcher, эмбеддер, git-интеграция, domains. | `indexer/pipeline.rs`, `indexer/service.rs`, `indexer/watcher.rs`, `indexer/embedder.rs` |
 | `indexer/parser/` | tree-sitter обвязка: динамический менеджер языков, chunking, skeleton extraction. | `parser/core.rs`, `parser/lang_manager/`, `parser/chunking.rs`, `parser/skeleton.rs` |
 | `storage/` | Метаданные в SQLite (sqlx), векторы в LanceDB. | `storage/sqlite.rs`, `storage/lance.rs` |
-| `languages/` | LSP-интеграции и language-specific логика. | `languages/{rust,typescript,vue,python,go,generic_lsp}.rs` |
+| `languages/` | Вспомогательные парсеры для language-specific метаданных (Vue-дерево). | `languages/vue.rs` |
 | `cache.rs` | Серверный LRU-кеш ответов на инструменты. | `cache.rs` |
 | `commit.rs` | Smart-commit генератор сообщений. | `commit.rs` |
 | `error_recovery.rs` | Circuit breakers для эмбеддера и векторного поиска. | `error_recovery.rs` |
@@ -65,9 +65,8 @@ gofer — это один бинарь с несколькими режимам�
 - `resource_limits: Arc<ResourceLimits>` — rate-limit / throttle.
 - `embedding_circuit`, `vector_circuit: Arc<CircuitBreaker>` — circuit breakers по двум критическим зависимостям.
 - `lang_manager: Arc<LanguageManager>` — реестр tree-sitter wasm-грамматик.
-- `pending_confirmations: DashMap` — очередь подтверждений для sandbox-выполнения кода.
 
-Проект (`ProjectState`) внутри хранит свои `SqliteStorage`, `LanceStorage`, `EmbedderPool`, `IndexerService`, watcher и handle на фоновой sync.
+Проект (`ProjectState`) внутри хранит свои `SqliteStorage`, `LanceStorage`, `EmbedderPool`, `IndexerService`, watcher, lang_manager и handle на фоновой sync.
 
 ### Жизненный цикл проекта
 
@@ -130,8 +129,7 @@ gofer down       → daemon/shutdown               → cancel + drop всех п
      │                │                       │                       │
      │                │                       │     build ToolContext:
      │                │                       │       sqlite, lance, embedder,
-     │                │                       │       cache, lsp, language_services,
-     │                │                       │       circuit breakers
+     │                │                       │       cache, circuit breakers
      │                │                       │                       │
      │                │                       │     tools::dispatch(name, args, ctx)
      │                │                       │       ── search::tool_search
@@ -160,19 +158,11 @@ Handlers сгруппированы по семантическим домена
 | Группа | Файл | Примеры инструментов |
 |---|---|---|
 | files | `files.rs` | `read_file`, `read_function_context`, `read_types_only`, `skeleton`, `grep`, `find_files`, `context_bundle` |
-| search | `search.rs` | `search`, `search_by_purpose`, `search_symbols`, `smart_file_selection` |
-| symbols | `symbols.rs` | `get_symbols`, `get_references`, `get_callers`, `get_callees`, `symbol_exists`, `is_exported`, `has_documentation` |
-| project | `project.rs` | `project_tree`, `get_dependencies`, `dependency_impact`, `domain_stats`, `add_rule`, `mark_golden_sample`, `get_vue_tree` |
-| git | `git.rs` | `git_diff`, `git_blame`, `git_history`, `verify_patch`, `suggest_commit` |
-| lsp | `lsp.rs`, `lang_tools.rs` | `lsp_hover`, `lsp_goto_definition`, `lsp_find_references`, `lsp_rename`, `lang_tools_call` |
-| index | `index.rs` | `get_index_status`, `validate_index`, `force_reindex`, `get_cache_stats`, `get_query_stats` |
-| diagnostics | `diagnostics.rs` | `run_diagnostics`, `run_check`, `health_check`, `has_tests_for` |
-| code_quality | `code_quality.rs` | `lint_file`, `apply_lint_fix`, `format_file` |
-| file_ops | `file_ops.rs` | `write_file`, `append_to_file`, `patch_file`, `move_file`, `create_directory` |
-| trash | `trash.rs` | `delete_safe`, `restore`, `list_trash`, `purge_trash` |
-| cas_buffer | `cas_buffer.rs` | `clipboard_store_text`, `clipboard_copy`, `clipboard_paste`, `clipboard_list`, `clipboard_replace`, `clipboard_clear` |
-| sandbox | `sandbox.rs` | `execute_code`, `execute_function`, `run_test`, `run_all_tests` |
-| transactions | `transactions.rs` | Атомарные многошаговые операции над файлами. |
+| search | `search.rs` | `search`, `search_by_purpose`, `search_symbols`, `smart_file_selection`, `structural_search` |
+| symbols | `symbols.rs` | `get_symbols`, `get_references`, `get_callers`, `get_callees`, `symbol_exists`, `is_exported`, `find_unused_symbols`, `find_unused_imports`, `call_path`, `dependency_subgraph`, `find_implementations`, `find_by_type_signature` |
+| project | `project.rs` | `project_tree`, `get_dependencies`, `dependency_impact`, `domain_stats`, `get_vue_tree`, `get_config_keys` |
+| git | `git.rs` | `git_diff`, `git_blame`, `git_history`, `suggest_commit` |
+| index | `index.rs` | `get_index_status`, `validate_index`, `force_reindex`, `get_cache_stats`, `get_query_stats`, `has_tests_for`, `health_check` |
 | batch | `batch.rs` | `batch_operations` — N инструментов в одном вызове. |
 
 Полный список см. в [tools-reference.md](tools-reference.md).
@@ -258,20 +248,9 @@ URL и имя модели берутся из секции `[embedding]` про
 
 `rkyv` zero-copy серилиализованный снапшот, который читается mmap'ом для быстрого скоринга файлов по запросу (без обращения к SQLite). Используется в `smart_file_selection` и `search` для ранжирования.
 
-## LSP и multi-language
+## Мультиязычность через tree-sitter
 
-`src/languages/` содержит обёртки над LSP-серверами, специфичные для каждого языка:
-
-- `rust.rs` — rust-analyzer.
-- `typescript.rs` — typescript-language-server.
-- `vue.rs` — Volar/Vue Language Server.
-- `python.rs` — pyright/pylsp.
-- `go.rs` — gopls.
-- `generic_lsp.rs` — fallback для любого LSP, заданного в конфиге.
-
-`LanguageService` (внутри `ProjectState`) поднимает LSP по требованию, кеширует процесс и проксирует запросы. MCP-инструменты `lsp_*` ходят через него.
-
-`tools/call lang_tools_list` возвращает доступные LSP-инструменты для текущего файла; `lang_tools_call` — универсальный диспетчер для language-specific операций (например, `rust_explain_struct`, `rust_expand_macro`, `rust_find_trait_impls`).
+gofer — язык-агностичный инструмент. Поддержка языков реализуется через tree-sitter wasm-грамматики (см. ниже). LSP-серверы и язык-специфичные сервисы не используются.
 
 ### Динамические грамматики tree-sitter
 
@@ -346,7 +325,7 @@ URL и имя модели берутся из секции `[embedding]` про
 
 | URI | mimeType | Что внутри |
 |---|---|---|
-| `project://context` | `application/json` | Правила (`add_rule`), golden samples, зависимости. |
+| `project://context` | `application/json` | Rules, golden samples, зависимости (из SQLite-таблиц). |
 | `project://tree` | `application/json` | `project_tree` глубиной 3. |
 | `project://stats` | `application/json` | Кол-во файлов, символов, распределение по доменам. |
 | `project://config` | `application/json` | Найденные конфиг-ключи (`get_config_keys`). |
@@ -442,12 +421,6 @@ URL и имя модели берутся из секции `[embedding]` про
 
 После дебаунса события группируются и кидаются в `IndexerService::run` через `mpsc`. Если файл больше `MAX_FILE_SIZE_BYTES = 2 МБ` (`pipeline.rs:91`) — пропускается с предупреждением.
 
-## Sandbox
-
-`handlers/sandbox.rs` (`execute_code`/`execute_function`/`run_test`/`run_all_tests`) запускает дочерний процесс через `tokio::process::Command` с таймаутом и захватом stdout/stderr. Изоляция сейчас минимальна: используется системный интерпретатор (`rustc`/`cargo`, `python3`, `node`), нет cgroups/seccomp/namespaces. **Не считать это контейнером.** Подразумевается, что код, который дёргает sandbox, доверен (например, ассистент-операт. в управляемой среде).
-
-`pending_confirmations: DashMap<id, (cmd, oneshot::Sender<bool>)>` в `DaemonState` — место для интерактивных подтверждений: при риск-чувствительных операциях handler может зарегистрировать запрос и ждать `true`/`false` от внешнего обработчика. На момент написания UI поверх этого механизма в gofer не выставлен.
-
 ## Глоссарий
 
 Краткий перевод терминов, которые часто встречаются в коде и документации.
@@ -540,15 +513,6 @@ URL и имя модели берутся из секции `[embedding]` про
 | Дефолтный URL | `http://127.0.0.1:8080/embed/` | `embedder.rs:34` |
 | Дефолтные dimensions | 1024 | `EmbedderPool::with_config:157` |
 | Дефолтная модель | `external_model` | там же:160 |
-
-### Sandbox
-
-| Параметр | Значение | Где |
-|---|---|---|
-| `execute_code` timeout default / max | 5 / 60 с | `core_tools_list` |
-| `execute_function` timeout default / max | 5 / 60 с | там же |
-| `run_test` timeout default / max | 30 / 60 с | там же |
-| `run_all_tests` timeout default / max | 60 / 120 с | там же |
 
 ## Что почитать дальше
 

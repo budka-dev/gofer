@@ -18,7 +18,7 @@
 2. [tools-reference.md](tools-reference.md) — полный список доступных инструментов и их параметров.
 3. [errors.md](errors.md) — JSON-RPC коды и как их интерпретировать.
 4. [config-reference.md](config-reference.md) — что положить в `.gofer/config.toml`.
-5. [security.md](security.md) — границы доверия, sandbox, утечки через эмбеддер.
+5. [security.md](security.md) — границы доверия, утечки через эмбеддер, IPC-доступ.
 6. [architecture.md](architecture.md) → разделы «Sequence: tools/call», «Маршрутизация MCP-инструментов».
 
 ## Я меняю код gofer'а (контрибьютор)
@@ -49,18 +49,18 @@
 
 | Файл | О чём |
 |---|---|
-| [examples.md](examples.md) | Сценарии использования: подключение, поиск, патч, batch, CAS-буфер, lang-tools. |
-| [benchmarks.md](benchmarks.md) | Сводная таблица замеров vs native: skeleton 76%, batch 3–5×, CAS 70–90%. |
+| [examples.md](examples.md) | Сценарии использования: подключение, поиск, навигация по символам, batch, structural search. |
+| [benchmarks.md](benchmarks.md) | Сводная таблица замеров vs native: skeleton 76%, batch 3–5×. |
 | [mcp-clients.md](mcp-clients.md) | Конфиги для Claude Code, Qoder, Cursor, Continue, Cline. |
 | [faq.md](faq.md) | Короткие частые вопросы. |
-| [troubleshooting.md](troubleshooting.md) | Демон не стартует, эмбеддер недоступен, индекс битый, watcher не реагирует, LSP молчит. |
+| [troubleshooting.md](troubleshooting.md) | Демон не стартует, эмбеддер недоступен, индекс битый, watcher не реагирует. |
 
 ### Архитектура и внутренности
 
 | Файл | О чём |
 |---|---|
 | [architecture.md](architecture.md) | Карта процессов, слои кода, pipeline, IPC, JSON-RPC, MCP resources, миграции, watcher, sandbox, sequence, глоссарий, таблица лимитов. |
-| [tools-reference.md](tools-reference.md) | Полный каталог MCP-инструментов (core + транзакции + lang-tools). |
+| [tools-reference.md](tools-reference.md) | Полный каталог MCP-инструментов (read-only: поиск, чтение, символы, git, индекс). |
 | [models.md](models.md) | Структуры данных в индексе: `Symbol`, `Chunk`, `SymbolReference`, `SymbolKind`. |
 | [storage-api.md](storage-api.md) | Публичный API `SqliteStorage`/`LanceStorage` по группам. |
 | [errors.md](errors.md) | Иерархия `GoferError` и JSON-RPC коды. |
@@ -79,7 +79,7 @@
 | Файл | О чём |
 |---|---|
 | [performance.md](performance.md) | RAM/диск/CPU, capacity planning, тюнинг. |
-| [security.md](security.md) | Модель безопасности: что индексируется, sandbox, IPC, эмбеддер. |
+| [security.md](security.md) | Модель безопасности: что индексируется, IPC, эмбеддер, audit log. |
 | [roadmap.md](roadmap.md) | Статус фич по фазам. |
 | [audit.md](audit.md) | Аудит инструментов: дубли, заглушки, критические пробелы для технического copilot'а (P0/P1/P2). |
 

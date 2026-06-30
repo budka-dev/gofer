@@ -1,6 +1,8 @@
 # lang-hub — реестр языковых пакетов
 
-`gofer install-lang <name>` качает tree-sitter-грамматику и LSP-конфиг из публичного репозитория [`budka-dev/lang-hub`](https://github.com/budka-dev/lang-hub). Этот документ описывает, что такое lang-hub, формат пакета и как добавить свой язык.
+`gofer install-lang <name>` качает tree-sitter-грамматику из публичного репозитория [`budka-dev/lang-hub`](https://github.com/budka-dev/lang-hub). Этот документ описывает, что такое lang-hub, формат пакета и как добавить свой язык.
+
+gofer использует только секции `[parser]` и `[indexer]` из lang-hub манифестов. Секции `[lsp]`, `[sandbox]`, `[formatter]`, `[linter]` загружаются но игнорируются — gofer не поднимает LSP-серверы и не запускает код.
 
 ## Зачем
 
@@ -141,7 +143,7 @@ args = ["clippy"]
 | `folds.scm` | Свёртка блоков (для будущей IDE-интеграции). |
 | `tags.scm` | Универсальные теги (ctags-стиль). |
 | `indents.scm` | Правила отступов. |
-| `outline.scm` | Дерево outline (для `lsp_document_symbols`). |
+| `outline.scm` | Дерево outline (для будущих outline-инструментов). |
 
 В минимальной поставке достаточно `symbols.scm` — остальные опциональны.
 

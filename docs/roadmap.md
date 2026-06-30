@@ -70,41 +70,20 @@
 | `find_production_errors` | 🔵 | В плане. Sentry/Bugsnag. |
 | `get_function_metrics` | 🔵 | В плане. APM-провайдеры. |
 
-## Phase 3+: Security, Multi-version, Sandboxes
+## Phase 3+: Удалённые направления
 
-| Фича | Статус | Комментарий |
-|---|---|---|
-| **Atomic transactions** (`begin_transaction`/`add_operation`/`commit_transaction`/`rollback_transaction`/`list_transactions`) | 🟡 | Handlers реализованы в `src/daemon/handlers/transactions.rs` со снапшотами и автооткатом, но **не зарегистрированы** в `dispatch`. Через MCP недоступны. |
-| **CAS-буфер** (`clipboard_*`) | ✅ | Полный набор: copy/paste/replace/store_text/list/clear. |
-| **Sandbox** (`execute_code`, `execute_function`, `run_test`, `run_all_tests`) | 🟡 | Работают, но изоляция минимальная (нет cgroups/seccomp). См. [security.md](security.md). |
-| **Code quality** (`format_file`, `lint_file`, `apply_lint_fix`) | ✅ | rustfmt/prettier/black/gofmt, clippy/eslint/ruff/golangci. |
-| **Trash** (`delete_safe`, `restore`, `list_trash`, `purge_trash`) | ✅ | Полный жизненный цикл. |
-| **File ops** (`write_file`, `append_to_file`, `patch_file`, `create_directory`, `move_file`) | ✅ | Базовый CRUD. |
+Следующие блоки были частично или полностью реализованы, но **удалены** в ходе рефакторинга на read-only модель (2026-06-30). Функциональность доступна через хост-агента (Claude Code, Qoder и т. д.).
 
-## LSP-интеграции
-
-| Язык | LSP-сервер | Статус |
-|---|---|---|
-| Rust | rust-analyzer | ✅ |
-| TypeScript | typescript-language-server | ✅ |
-| Vue | Volar / vls | ✅ |
-| Python | pyright / pylsp | ✅ |
-| Go | gopls | ✅ |
-| Прочее | через `generic_lsp` | ✅ |
-
-Все 14 LSP-инструментов реализованы (`lsp_hover`, `lsp_goto_definition`, …). См. [tools-reference.md::LSP-навигация](tools-reference.md#lsp-навигация).
-
-## Language-tools (`lang_tools_*`)
-
-| Язык | Кол-во инструментов | Статус |
-|---|---|---|
-| Rust | 15 (включая 7 LSP-обёрток) | ✅ |
-| TypeScript | 6 | ✅ |
-| Vue | 6 | ✅ |
-| Python | 4 | ✅ |
-| Go | 6 | ✅ |
-
-См. [tools-reference.md::Каталог language-tools](tools-reference.md#каталог-language-tools).
+| Фича | Статус |
+|---|---|
+| **Atomic transactions** (`begin_transaction` / `add_operation` / `commit_transaction` / `rollback_transaction` / `list_transactions`) | ❌ Удалено |
+| **CAS-буфер** (`clipboard_*`) | ❌ Удалено |
+| **Sandbox** (`execute_code`, `execute_function`, `run_test`, `run_all_tests`) | ❌ Удалено |
+| **Code quality** (`format_file`, `lint_file`, `apply_lint_fix`) | ❌ Удалено |
+| **Trash** (`delete_safe`, `restore`, `list_trash`, `purge_trash`) | ❌ Удалено |
+| **File ops** (`write_file`, `append_to_file`, `patch_file`, `create_directory`, `move_file`) | ❌ Удалено |
+| **LSP-инструменты** (`lsp_hover`, `lsp_goto_definition`, …) | ❌ Удалено |
+| **Language-tools** (`lang_tools_call`, `rust_*`, `ts_*`, `vue_*`, `py_*`, `go_*`) | ❌ Удалено |
 
 ## Инфраструктура
 
