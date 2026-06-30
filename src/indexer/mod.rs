@@ -1,5 +1,4 @@
 pub mod context;
-pub mod diagnostics;
 pub mod domains;
 pub mod embedder;
 pub mod git;

@@ -17,7 +17,6 @@ pub async fn dispatch(name: &str, args: Value, ctx: &ToolContext) -> Result<Valu
         "get_references" => symbols::tool_get_references(args, ctx).await,
         "get_dependencies" => project::tool_get_dependencies(args, ctx).await,
         "dependency_impact" => project::tool_dependency_impact(args, ctx).await,
-        "run_diagnostics" => diagnostics::tool_run_diagnostics(args, ctx).await,
         "get_config_keys" => diagnostics::tool_get_config_keys(ctx).await,
         "get_vue_tree" => project::tool_get_vue_tree(args, ctx).await,
         "git_blame" => git::tool_git_blame(args, ctx).await,
@@ -31,7 +30,6 @@ pub async fn dispatch(name: &str, args: Value, ctx: &ToolContext) -> Result<Valu
         "complexity" => complexity::tool_complexity(args, ctx).await,
         "find_unreachable" => unreachable::tool_find_unreachable(args, ctx).await,
         "skeleton" => files::tool_skeleton(args, ctx).await,
-        "verify_patch" => git::tool_verify_patch(args, ctx).await,
         "read_file" => files::tool_read_file(args, ctx).await,
         "project_tree" => project::tool_project_tree(args, ctx).await,
         "search_symbols" => symbols::tool_search_symbols(args, ctx).await,
@@ -65,8 +63,6 @@ pub async fn dispatch(name: &str, args: Value, ctx: &ToolContext) -> Result<Valu
         // Phase 1: File Operations
         "list_directory" => file_ops::tool_list_directory(args, ctx).await,
         "get_file_metadata" => file_ops::tool_get_file_metadata(args, ctx).await,
-        // Code Quality Tools (Phase 2)
-        "lint_file" => code_quality::tool_lint_file(args, ctx).await,
         _ => Err(GoferError::MethodNotFound(name.to_string()).into()),
     }
 }
@@ -135,20 +131,6 @@ pub fn core_tools_list() -> Vec<Value> {
                     "name": { "type": "string", "description": "Dependency name (e.g., 'tokio', 'react')" }
                 },
                 "required": ["name"]
-            }
-        }),
-        json!({
-            "name": "run_diagnostics",
-            "description": "Run cargo check and/or tsc to refresh compiler diagnostics. You can pass options for cargo check to target specific workspaces, packages, or all targets. Pass `file` to filter the diagnostics returned to a single file.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "workspace": { "type": "boolean", "description": "Check all packages in the workspace (cargo check --workspace)" },
-                    "all_targets": { "type": "boolean", "description": "Check all targets (cargo check --all-targets) including tests and benches" },
-                    "package": { "type": "string", "description": "Package to check (cargo check -p <package>)" },
-                    "manifest_path": { "type": "string", "description": "Path to Cargo.toml (cargo check --manifest-path <path>)" },
-                    "file": { "type": "string", "description": "Only return diagnostics whose file path contains this string (relative to project root)" }
-                }
             }
         }),
         json!({
@@ -266,18 +248,6 @@ pub fn core_tools_list() -> Vec<Value> {
                     }
                 },
                 "required": ["file"]
-            }
-        }),
-        json!({
-            "name": "verify_patch",
-            "description": "Verify a code patch by temporarily applying it and running the compiler/linter. Returns diagnostics (errors, warnings) without modifying the file permanently.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "file": { "type": "string", "description": "Relative file path to verify (e.g. src/main.rs)" },
-                    "content": { "type": "string", "description": "Full file content to verify (the patched version)" }
-                },
-                "required": ["file", "content"]
             }
         }),
         json!({
@@ -701,21 +671,6 @@ pub fn core_tools_list() -> Vec<Value> {
         json!({
             "name": "get_file_metadata",
             "description": "Get file metadata: size, modification time, line count, binary detection. Use before reading large files to decide on reading strategy.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "File path (relative to project root)"
-                    }
-                },
-                "required": ["path"]
-            }
-        }),
-        // Code Quality Tools (Phase 2)
-        json!({
-            "name": "lint_file",
-            "description": "Run linter on file (clippy, eslint, ruff, golangci-lint). Returns token-optimized flat string array of warnings with line numbers, severity, and auto-fix availability.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

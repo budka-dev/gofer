@@ -1,5 +1,4 @@
 pub mod batch;
-pub mod code_quality;
 pub mod complexity;
 pub mod common;
 pub mod diagnostics;

@@ -111,42 +111,6 @@ pub struct LangManifest {
     pub linter: Option<ManifestFormatLint>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct ToolManifestBinary {
-    pub url: String,
-    pub executable_name: String,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct ToolInstall {
-    pub binary: ToolManifestBinary,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct ToolManifestConfig {
-    pub command: String,
-    #[serde(default)]
-    pub args: Vec<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct ToolManifestInfo {
-    pub name: String,
-    #[serde(default)]
-    pub description: String,
-    #[serde(default)]
-    pub capabilities: Vec<String>,
-    pub install: Option<ToolInstall>,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct ToolManifest {
-    pub tool: ToolManifestInfo,
-    pub linter: Option<ToolManifestConfig>,
-    pub formatter: Option<ToolManifestConfig>,
-    pub lsp: Option<ToolManifestConfig>,
-}
-
 #[derive(Clone)]
 pub struct LoadedLanguage {
     pub manifest: LangManifest,
@@ -157,14 +121,10 @@ pub struct LoadedLanguage {
 pub struct LanguageManager {
     /// Mapping of language name to LoadedLanguage
     pub loaded_langs: Arc<dashmap::DashMap<String, Arc<LoadedLanguage>>>,
-    /// Mapping of tool name to ToolManifest
-    pub loaded_tools: Arc<dashmap::DashMap<String, Arc<ToolManifest>>>,
     /// Extension to language name mapping (e.g., "rs" -> "rust")
     pub ext_to_lang: Arc<dashmap::DashMap<String, String>>,
     /// Directory where language packs are stored (e.g., ~/.gofer/langs)
     pub langs_dir: PathBuf,
-    /// Directory where tool configs are stored (e.g., ~/.gofer/tools)
-    pub tools_dir: PathBuf,
     /// Shared WebAssembly engine for compiling parsers
     pub engine: tree_sitter::wasmtime::Engine,
     /// Prevents concurrent downloads of the same language
@@ -172,17 +132,13 @@ pub struct LanguageManager {
 }
 
 impl LanguageManager {
-    pub fn new(langs_dir: Option<PathBuf>, tools_dir: Option<PathBuf>) -> Result<Self, LangManagerError> {
+    pub fn new(langs_dir: Option<PathBuf>, _tools_dir: Option<PathBuf>) -> Result<Self, LangManagerError> {
         let base_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".gofer");
-        
+
         let langs_dir = langs_dir.unwrap_or_else(|| base_dir.join("langs"));
-        let tools_dir = tools_dir.unwrap_or_else(|| base_dir.join("tools"));
 
         if !langs_dir.exists() {
             std::fs::create_dir_all(&langs_dir)?;
-        }
-        if !tools_dir.exists() {
-            std::fs::create_dir_all(&tools_dir)?;
         }
 
         let engine = tree_sitter::wasmtime::Engine::default();
@@ -205,10 +161,8 @@ impl LanguageManager {
 
         Ok(Self {
             loaded_langs: Arc::new(dashmap::DashMap::new()),
-            loaded_tools: Arc::new(dashmap::DashMap::new()),
             ext_to_lang: Arc::new(ext_to_lang),
             langs_dir,
-            tools_dir,
             engine,
             download_locks: Arc::new(dashmap::DashMap::new()),
         })
@@ -457,162 +411,6 @@ impl LanguageManager {
         self.load_language_from_disk(lang_name)
     }
 
-    pub fn get_tool(&self, tool_name: &str) -> Option<Arc<ToolManifest>> {
-        if let Some(entry) = self.loaded_tools.get(tool_name) {
-            return Some(entry.value().clone());
-        }
-
-        if self.load_tool_from_disk(tool_name).is_ok() {
-            if let Some(entry) = self.loaded_tools.get(tool_name) {
-                return Some(entry.value().clone());
-            }
-        }
-
-        tracing::info!("Tool {} not found locally, auto-downloading from lang-hub...", tool_name);
-        
-        let handle = tokio::runtime::Handle::try_current();
-        let res = match handle {
-            Ok(h) => {
-                tokio::task::block_in_place(|| {
-                    h.block_on(async {
-                        self.install_tool_from_github(tool_name).await
-                    })
-                })
-            }
-            Err(_) => {
-                if let Ok(rt) = tokio::runtime::Runtime::new() {
-                    rt.block_on(async {
-                        self.install_tool_from_github(tool_name).await
-                    })
-                } else {
-                    Err(LangManagerError::EngineError("Failed to create tokio runtime".to_string()))
-                }
-            }
-        };
-
-        if let Err(e) = res {
-            tracing::error!("Failed to auto-download tool {}: {}", tool_name, e);
-            return None;
-        }
-
-        if let Err(e) = self.load_tool_from_disk(tool_name) {
-            tracing::error!("Failed to load tool {} after download: {}", tool_name, e);
-            return None;
-        }
-
-        self.loaded_tools.get(tool_name).map(|entry| entry.value().clone())
-    }
-
-    pub fn load_tool_from_disk(&self, tool_name: &str) -> Result<(), LangManagerError> {
-        if self.loaded_tools.contains_key(tool_name) {
-            return Ok(());
-        }
-
-        let manifest_path = self.tools_dir.join(tool_name).join("manifest.toml");
-        
-        if !manifest_path.exists() {
-            return Err(LangManagerError::LanguageNotFound(format!("Tool manifest missing for {}", tool_name)));
-        }
-
-        let manifest_str = std::fs::read_to_string(manifest_path)?;
-        let manifest: ToolManifest = toml::from_str(&manifest_str)?;
-
-        self.loaded_tools.insert(tool_name.to_string(), Arc::new(manifest));
-        tracing::info!("Successfully loaded tool plugin: {}", tool_name);
-
-        Ok(())
-    }
-
-    pub async fn install_tool_from_github(&self, tool_name: &str) -> Result<(), LangManagerError> {
-        let manifest_url = format!("https://raw.githubusercontent.com/budka-dev/lang-hub/main/tools/{}/manifest.toml", tool_name);
-        
-        let resp = reqwest::get(&manifest_url).await?;
-        if !resp.status().is_success() {
-            return Err(LangManagerError::LanguageNotFound(format!("Tool {} not found in lang-hub", tool_name)));
-        }
-        let manifest_str = resp.text().await?;
-        let _manifest: ToolManifest = toml::from_str(&manifest_str)?; // Validate
-        
-        let tool_dir = self.tools_dir.join(tool_name);
-        std::fs::create_dir_all(&tool_dir)?;
-        
-        std::fs::write(tool_dir.join("manifest.toml"), &manifest_str)?;
-        
-        tracing::info!("Successfully downloaded tool manifest for {} from lang-hub", tool_name);
-        
-        self.load_tool_from_disk(tool_name)
-    }
-
-    pub async fn download_and_extract_binary(&self, tool_name: &str, manifest: &ToolManifest) -> Result<PathBuf, LangManagerError> {
-        let install_config = match &manifest.tool.install {
-            Some(i) => i,
-            None => {
-                tracing::debug!("No install config for tool {}", tool_name);
-                return Err(LangManagerError::LanguageNotFound(format!("No install config for tool {}", tool_name)));
-            }
-        };
-
-        let binary_config = &install_config.binary;
-        let tool_dir = self.tools_dir.join(tool_name).join("bin");
-        std::fs::create_dir_all(&tool_dir)?;
-
-        let exe_path = tool_dir.join(&binary_config.executable_name);
-        if exe_path.exists() {
-            return Ok(exe_path);
-        }
-
-        tracing::info!("Downloading binary for {} from {}", tool_name, binary_config.url);
-        let resp = reqwest::get(&binary_config.url).await?;
-        if !resp.status().is_success() {
-            return Err(LangManagerError::LanguageNotFound(format!("Failed to download tool {}: {}", tool_name, resp.status())));
-        }
-
-        let bytes = resp.bytes().await?;
-        
-        if binary_config.url.ends_with(".tar.gz") || binary_config.url.ends_with(".tgz") {
-            tracing::info!("Extracting archive for {}", tool_name);
-            let cursor = std::io::Cursor::new(bytes);
-            let tar = flate2::read::GzDecoder::new(cursor);
-            let mut archive = tar::Archive::new(tar);
-            
-            let temp_dir = tempfile::tempdir()?;
-            archive.unpack(temp_dir.path())?;
-            
-            let mut found_exe = None;
-            for entry in walkdir::WalkDir::new(temp_dir.path()).into_iter().flatten() {
-                if entry.file_type().is_file() && entry.file_name() == binary_config.executable_name.as_str() {
-                    found_exe = Some(entry.path().to_path_buf());
-                    break;
-                }
-            }
-
-            if let Some(src_exe) = found_exe {
-                std::fs::copy(&src_exe, &exe_path)?;
-                
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let mut perms = std::fs::metadata(&exe_path)?.permissions();
-                    perms.set_mode(0o755);
-                    std::fs::set_permissions(&exe_path, perms)?;
-                }
-            } else {
-                return Err(LangManagerError::LanguageNotFound(format!("Executable {} not found in archive", binary_config.executable_name)));
-            }
-        } else {
-            std::fs::write(&exe_path, bytes)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mut perms = std::fs::metadata(&exe_path)?.permissions();
-                perms.set_mode(0o755);
-                std::fs::set_permissions(&exe_path, perms)?;
-            }
-        }
-
-        tracing::info!("Successfully installed binary for {}", tool_name);
-        Ok(exe_path)
-    }
 }
 
 #[cfg(test)]

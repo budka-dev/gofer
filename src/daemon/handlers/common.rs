@@ -16,7 +16,6 @@ pub struct ToolContext {
     pub cache: Arc<CacheManager>,
     pub embedding_circuit: Arc<CircuitBreaker>,
     pub vector_circuit: Arc<CircuitBreaker>,
-    pub lang_manager: Arc<crate::indexer::parser::lang_manager::LanguageManager>,
 }
 
 /// Резолвинг пути: если путь относительный, превращает в абсолютный через root_path.

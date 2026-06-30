@@ -632,7 +632,6 @@ async fn handle_tools_call(
         cache: Arc::clone(&project.cache),
         embedding_circuit: Arc::clone(&state.embedding_circuit),
         vector_circuit: Arc::clone(&state.vector_circuit),
-        lang_manager: Arc::clone(&state.lang_manager),
     };
 
     // Core tools
@@ -745,7 +744,6 @@ async fn handle_resources_read(
         cache: Arc::clone(&project.cache),
         embedding_circuit: Arc::clone(&state.embedding_circuit),
         vector_circuit: Arc::clone(&state.vector_circuit),
-        lang_manager: Arc::clone(&state.lang_manager),
     };
 
     let result = match uri {
@@ -898,7 +896,6 @@ async fn handle_prompts_get(
         cache: Arc::clone(&project.cache),
         embedding_circuit: Arc::clone(&state.embedding_circuit),
         vector_circuit: Arc::clone(&state.vector_circuit),
-        lang_manager: Arc::clone(&state.lang_manager),
     };
 
     let result = match name {

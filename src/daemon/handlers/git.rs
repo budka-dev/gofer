@@ -145,30 +145,3 @@ pub async fn tool_suggest_commit(args: Value, ctx: &ToolContext) -> Result<Value
     Ok(serde_json::to_value(suggestion)?)
 }
 
-pub async fn tool_verify_patch(args: Value, ctx: &ToolContext) -> Result<Value> {
-    let file = args.get("file").and_then(|v| v.as_str()).unwrap_or("");
-    let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
-
-    if file.is_empty() || content.is_empty() {
-        return Err(
-            GoferError::InvalidParams("Both 'file' and 'content' are required".into()).into(),
-        );
-    }
-
-    let result = crate::indexer::diagnostics::verify_patch(&ctx.root_path, file, content).await?;
-
-    Ok(json!({
-        "file": file,
-        "status": result.status,
-        "summary": result.summary,
-        "diagnostics": result.diagnostics.iter().map(|d| {
-            let col = d.column.map(|c| format!(":{}", c)).unwrap_or_default();
-            let code = d.code.as_deref().map(|c| format!("{}: ", c)).unwrap_or_default();
-            let mut s = format!("{}{u} [{}] {}{}", d.line, d.severity, code, d.message, u = col);
-            if let Some(ref sugg) = d.suggestion {
-                s.push_str(&format!(" (suggestion: {})", sugg));
-            }
-            s
-        }).collect::<Vec<_>>()
-    }))
-}
