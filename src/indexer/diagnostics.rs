@@ -258,7 +258,7 @@ async fn process_cargo_message(
 /// banner) that we then reported as "0 errors". Now we discover and run each
 /// tsconfig separately.
 pub async fn run_tsc_check(root: &Path, sqlite: &SqliteStorage) -> anyhow::Result<CheckStatus> {
-    let tsconfigs = crate::languages::typescript::discover_workspace_tsconfigs(root);
+    let tsconfigs: Vec<std::path::PathBuf> = Vec::new();
 
     if tsconfigs.is_empty() {
         return Ok(CheckStatus::Skipped {

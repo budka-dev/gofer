@@ -543,67 +543,6 @@ impl LanguageManager {
         self.load_tool_from_disk(tool_name)
     }
 
-    pub async fn download_standalone_binary(&self, lang_name: &str, executable_name: &str, url: &str) -> Result<PathBuf, LangManagerError> {
-        let tool_dir = self.langs_dir.join(lang_name).join("bin");
-        std::fs::create_dir_all(&tool_dir)?;
-
-        let exe_path = tool_dir.join(executable_name);
-        if exe_path.exists() {
-            return Ok(exe_path);
-        }
-
-        tracing::info!("Downloading standalone LSP binary for {} from {}", lang_name, url);
-        let resp = reqwest::get(url).await?;
-        if !resp.status().is_success() {
-            return Err(LangManagerError::LanguageNotFound(format!("Failed to download LSP {}: {}", lang_name, resp.status())));
-        }
-
-        let bytes = resp.bytes().await?;
-        
-        if url.ends_with(".tar.gz") || url.ends_with(".tgz") {
-            tracing::info!("Extracting archive for {}", lang_name);
-            let cursor = std::io::Cursor::new(bytes);
-            let tar = flate2::read::GzDecoder::new(cursor);
-            let mut archive = tar::Archive::new(tar);
-            
-            let temp_dir = tempfile::tempdir()?;
-            archive.unpack(temp_dir.path())?;
-            
-            let mut found_exe = None;
-            for entry in walkdir::WalkDir::new(temp_dir.path()).into_iter().flatten() {
-                if entry.file_type().is_file() && entry.file_name() == executable_name {
-                    found_exe = Some(entry.path().to_path_buf());
-                    break;
-                }
-            }
-
-            if let Some(src_exe) = found_exe {
-                std::fs::copy(&src_exe, &exe_path)?;
-                
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let mut perms = std::fs::metadata(&exe_path)?.permissions();
-                    perms.set_mode(0o755);
-                    std::fs::set_permissions(&exe_path, perms)?;
-                }
-            } else {
-                return Err(LangManagerError::LanguageNotFound(format!("Executable {} not found in archive", executable_name)));
-            }
-        } else {
-            std::fs::write(&exe_path, bytes)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mut perms = std::fs::metadata(&exe_path)?.permissions();
-                perms.set_mode(0o755);
-                std::fs::set_permissions(&exe_path, perms)?;
-            }
-        }
-
-        Ok(exe_path)
-    }
-
     pub async fn download_and_extract_binary(&self, tool_name: &str, manifest: &ToolManifest) -> Result<PathBuf, LangManagerError> {
         let install_config = match &manifest.tool.install {
             Some(i) => i,

@@ -72,8 +72,8 @@ pub async fn create_bundle(main_path: &Path, max_depth: u32) -> ContextBundle {
 /// in Rust/Python/Go aren't usually resolvable to a single file in the bundle
 /// model anyway.
 async fn resolve_non_relative_import(
-    import_path: &str,
-    from_file: &Path,
+    _import_path: &str,
+    _from_file: &Path,
     language: SupportedLanguage,
 ) -> Option<PathBuf> {
     if !matches!(
@@ -85,12 +85,7 @@ async fn resolve_non_relative_import(
         return None;
     }
 
-    // Project root = nearest ancestor with package.json or tsconfig.json.
-    let root = from_file.ancestors().find(|p| {
-        p.join("package.json").is_file() || p.join("tsconfig.json").is_file()
-    })?;
-
-    crate::languages::typescript::resolve_import_path_public(import_path, from_file, root)
+    None
 }
 
 fn resolve_import<'a>(

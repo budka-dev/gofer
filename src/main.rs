@@ -8,7 +8,6 @@ mod error;
 mod error_recovery; // Feature 016: graceful error handling & recovery
 mod indexer;
 mod ipc;
-mod languages;
 mod logger;
 mod models;
 mod resource_limits; // Feature 015: connection pooling & resource management

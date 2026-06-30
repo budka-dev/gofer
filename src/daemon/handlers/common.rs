@@ -1,11 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 use crate::cache::CacheManager;
 use crate::error_recovery::CircuitBreaker;
 use crate::indexer::EmbedderPool;
-use crate::languages::{generic_lsp::GenericLspClient, LanguageService};
 use crate::storage::{LanceStorage, SqliteStorage};
 
 /// Context for executing tools — Arc-wrapped resources for cloning across async tasks.
@@ -19,142 +17,7 @@ pub struct ToolContext {
     pub embedding_circuit: Arc<CircuitBreaker>,
     pub vector_circuit: Arc<CircuitBreaker>,
     pub lang_manager: Arc<crate::indexer::parser::lang_manager::LanguageManager>,
-    pub lsp_clients: Arc<RwLock<std::collections::HashMap<String, Arc<GenericLspClient>>>>,
-    /// Language-specific services (Vue, TypeScript, Python, etc.)
-    pub language_services: Arc<Vec<Box<dyn LanguageService>>>,
     pub state: Arc<crate::daemon::state::DaemonState>,
-}
-
-impl ToolContext {
-    /// Get or initialize an LSP client for this file based on its extension
-    #[allow(dead_code)]
-    pub async fn get_lsp_client(&self, file_path: &str) -> anyhow::Result<Option<Arc<GenericLspClient>>> {
-        let ext = std::path::Path::new(file_path).extension().and_then(|e| e.to_str()).unwrap_or("");
-        
-        // 1. Resolve Language via lang_manager
-        let lang_name = match self.lang_manager.get_language_by_ext(ext) {
-            Some(l) => l,
-            None => return Ok(None) // No language support
-        };
-        
-        // 2. Load manifest to find LSP details
-        let loaded_lang = match self.lang_manager.get_language(&lang_name) {
-            Some(l) => l,
-            None => return Ok(None)
-        };
-        
-        let lsp_config = match &loaded_lang.manifest.lsp {
-            Some(config) => config.clone(),
-            None => return Ok(None) // No LSP configured for this language
-        };
-
-        let lang_id = lsp_config.name.clone().unwrap_or_else(|| lang_name.clone());
-
-        // Fast path: already initialized
-        {
-            let clients_guard = self.lsp_clients.read().await;
-            if let Some(client) = clients_guard.get(&lang_id) {
-                if client.is_ready().await {
-                    return Ok(Some(client.clone()));
-                }
-            }
-        }
-
-        // Slow path: initialize LSP client
-        let mut clients_guard = self.lsp_clients.write().await;
-
-        // Double-check in case another task initialized it
-        if let Some(client) = clients_guard.get(&lang_id) {
-            if client.is_ready().await {
-                return Ok(Some(client.clone()));
-            }
-        }
-
-        let command_str;
-        let mut tool_args = Vec::new();
-
-        if let Some(c) = &lsp_config.command {
-            let mut cmd = c.clone();
-            
-            if let Some(url) = &lsp_config.download_url {
-                let shell_parts = shell_words::split(c).unwrap_or_else(|_| vec![c.clone()]);
-                let exe_name = shell_parts.into_iter().next().unwrap_or_else(|| c.clone());
-                
-                let local_exe = self.lang_manager.langs_dir.join(&lang_name).join("bin").join(&exe_name);
-                if !local_exe.exists() && which::which(&exe_name).is_err() {
-                    tracing::info!("LSP executable {} not found locally or in PATH. Attempting fallback download...", exe_name);
-                    if let Ok(path) = self.lang_manager.download_standalone_binary(&lang_name, &exe_name, url).await {
-                        cmd = path.to_string_lossy().to_string();
-                    }
-                } else if local_exe.exists() {
-                    cmd = local_exe.to_string_lossy().to_string();
-                }
-            }
-            command_str = cmd;
-        } else if let Some(t) = &lsp_config.tool {
-            if let Some(tool_manifest) = self.lang_manager.get_tool(t) {
-                if let Some(lsp_tool_config) = &tool_manifest.lsp {
-                    let mut cmd = lsp_tool_config.command.clone();
-                    
-                    if let Some(install) = &tool_manifest.tool.install {
-                        let exe_name = &install.binary.executable_name;
-                        let local_exe = self.lang_manager.tools_dir.join(t).join("bin").join(exe_name);
-                        
-                        if !local_exe.exists() {
-                            tracing::info!("Tool executable {} not found locally. Attempting to download...", exe_name);
-                            if let Ok(path) = self.lang_manager.download_and_extract_binary(t, &tool_manifest).await {
-                                cmd = path.to_string_lossy().to_string();
-                            }
-                        } else {
-                            cmd = local_exe.to_string_lossy().to_string();
-                        }
-                    }
-
-                    command_str = cmd;
-                    tool_args = lsp_tool_config.args.clone();
-                } else {
-                    tracing::warn!("Tool {} does not have LSP capabilities", t);
-                    return Ok(None);
-                }
-            } else {
-                tracing::warn!("Tool {} not found in lang-hub", t);
-                return Ok(None);
-            }
-        } else {
-            return Ok(None);
-        }
-
-        // Start new instance
-        let shell_args = shell_words::split(&command_str)
-            .unwrap_or_else(|_| vec![command_str.clone()]);
-        let cmd = shell_args[0].clone();
-        let mut args: Vec<String> = shell_args.into_iter().skip(1).collect();
-        args.extend(tool_args);
-
-        let mut actual_root = self.root_path.as_ref().clone();
-        if let Ok(file_path_buf) = resolve_path_buf(&self.root_path, file_path) {
-            actual_root = find_project_root(
-                &file_path_buf,
-                &loaded_lang.manifest.language.root_markers,
-                &self.root_path
-            );
-        }
-
-        let init_options = lsp_config.init_options.clone();
-
-        let client = Arc::new(GenericLspClient::new(
-            actual_root,
-            cmd,
-            args,
-            lang_id.clone(),
-            init_options,
-        ));
-        
-        client.start().await?;
-        clients_guard.insert(lang_id, client.clone());
-
-        Ok(Some(client))
-    }
 }
 
 /// Finds the specific project root for a file by traversing upwards looking for root markers.

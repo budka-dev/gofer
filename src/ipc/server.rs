@@ -652,8 +652,6 @@ async fn handle_tools_call(
         embedding_circuit: Arc::clone(&state.embedding_circuit),
         vector_circuit: Arc::clone(&state.vector_circuit),
         lang_manager: Arc::clone(&state.lang_manager),
-        lsp_clients: Arc::clone(&project.lsp_clients),
-        language_services: Arc::clone(&project.language_services),
         state: Arc::clone(state),
     };
 
@@ -768,8 +766,6 @@ async fn handle_resources_read(
         embedding_circuit: Arc::clone(&state.embedding_circuit), // Feature 016
         vector_circuit: Arc::clone(&state.vector_circuit),       // Feature 016
         lang_manager: Arc::clone(&state.lang_manager),
-        lsp_clients: Arc::clone(&project.lsp_clients),
-        language_services: Arc::clone(&project.language_services),
         state: Arc::clone(state),
     };
 
@@ -924,8 +920,6 @@ async fn handle_prompts_get(
         embedding_circuit: Arc::clone(&state.embedding_circuit), // Feature 016
         vector_circuit: Arc::clone(&state.vector_circuit),       // Feature 016
         lang_manager: Arc::clone(&state.lang_manager),
-        lsp_clients: Arc::clone(&project.lsp_clients),
-        language_services: Arc::clone(&project.language_services),
         state: Arc::clone(state),
     };
 
