@@ -1,6 +1,5 @@
 use super::common::{make_relative, resolve_path, ToolContext};
 use crate::error::GoferError;
-use crate::models::Rule;
 use anyhow::Result;
 use serde_json::{json, Value};
 use walkdir::{DirEntry, WalkDir};
@@ -180,56 +179,3 @@ pub async fn tool_get_vue_tree(args: Value, ctx: &ToolContext) -> Result<Value> 
     }
 }
 
-pub async fn tool_add_rule(args: Value, ctx: &ToolContext) -> Result<Value> {
-    let category = args
-        .get("category")
-        .and_then(|v| v.as_str())
-        .unwrap_or("general");
-    let rule = args.get("rule").and_then(|v| v.as_str()).unwrap_or("");
-    let priority = args.get("priority").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-
-    if rule.is_empty() {
-        return Err(GoferError::InvalidParams("Rule text is required".into()).into());
-    }
-
-    let r = Rule {
-        category: category.to_string(),
-        rule: rule.to_string(),
-        priority,
-        source: Some("mcp_tool".to_string()),
-        id: 0,
-    };
-
-    ctx.sqlite.upsert_rules(&[r], "mcp_tool").await?;
-
-    Ok(json!({
-        "status": "success",
-        "message": "Rule added"
-    }))
-}
-
-pub async fn tool_mark_golden_sample(args: Value, ctx: &ToolContext) -> Result<Value> {
-    let file = args.get("file").and_then(|v| v.as_str()).unwrap_or("");
-    let category = args.get("category").and_then(|v| v.as_str());
-    let description = args.get("description").and_then(|v| v.as_str());
-
-    if file.is_empty() {
-        return Err(GoferError::InvalidParams("File path is required".into()).into());
-    }
-
-    let file_path = resolve_path(&ctx.root_path, file);
-
-    // Find file_id
-    if let Some(file) = ctx.sqlite.get_file(&file_path).await? {
-        ctx.sqlite
-            .mark_golden_sample(file.id, category, description)
-            .await?;
-        Ok(json!({
-            "status": "success",
-            "file": file.path,
-            "marked": true
-        }))
-    } else {
-        Err(GoferError::InvalidParams(format!("File not indexed: {}", file)).into())
-    }
-}
