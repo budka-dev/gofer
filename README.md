@@ -1,6 +1,6 @@
 # gofer
 
-MCP-сервер на Rust для индексации и навигации по кодовым базам. Предоставляет AI-ассистентам токен-эффективный доступ к коду через AST-парсинг, семантический поиск и компактные ответы.
+**Read-only** MCP-сервер на Rust для индексации и навигации по кодовым базам. Предоставляет AI-ассистентам токен-эффективный доступ к коду через AST-парсинг, семантический поиск и компактные ответы. gofer **не изменяет файлы** — мутации, рефакторинг и выполнение кода делегируются хост-агенту (Claude Code, Cursor и др.).
 
 - Версия: `0.1.0` (MVP)
 - Toolchain: Rust 2021, проверено на `1.93.0`
@@ -12,8 +12,7 @@ MCP-сервер на Rust для индексации и навигации п�
 - Stdio-мост `gofer mcp`, который подключают MCP-клиенты (Claude Code, Qoder и др.).
 - Гибридное хранилище: SQLite для метаданных и символов, LanceDB для векторов.
 - AST через tree-sitter с динамически загружаемыми wasm-грамматиками (`gofer install-lang <name>`).
-- Интеграции с LSP (rust-analyzer, pyright, typescript-language-server и т. д.).
-- 70+ MCP-инструментов: поиск, чтение, символы, git, диагностика, sandbox, буфер обмена, batch.
+- ~42 read-only MCP-инструмента: поиск, чтение (skeleton/context_bundle), символы и граф вызовов, git, диагностика индекса, batch. Все язык-агностичны — работают на собственном индексе, без внешних language servers.
 
 Подробнее: [docs/](docs/).
 
@@ -25,7 +24,6 @@ gofer заточен под одну вещь: дать AI-ассистенту 
 - `read_function_context` — одна функция вместе с её типами/импортами, экономит 90–95% относительно чтения файла.
 - `read_types_only` — только структуры данных, без логики.
 - `context_bundle skeleton_deps_only=true` — главный файл целиком, его зависимости как скелеты.
-- `clipboard_copy/paste` (CAS-буфер) — короткий hash вместо повторной отправки кода, защита от галлюцинаций при копировании.
 - `batch_operations` — N read/search-вызовов одним RPC, latency падает в 3–5×.
 
 См. [docs/examples.md](docs/examples.md) — реальные сценарии «что вместо чего». Сравнения с native инструментами лежат в `tests/*_comparison.md`.
@@ -163,10 +161,10 @@ shared_paths = []
 - [docs/mcp-clients.md](docs/mcp-clients.md) — конфиги для Claude Code, Qoder, Cursor, Continue, Cline.
 - [docs/embedder.md](docs/embedder.md) — контракт HTTP-эмбеддера, пример сервера.
 - [docs/examples.md](docs/examples.md) — реальные сценарии и экономия токенов.
-- [docs/benchmarks.md](docs/benchmarks.md) — цифры замеров: skeleton 76%, CAS 70–90%.
+- [docs/benchmarks.md](docs/benchmarks.md) — цифры замеров: skeleton 76%.
 
 **Справочники:**
-- [docs/tools-reference.md](docs/tools-reference.md) — 70+ MCP-инструментов + каталог lang-tools.
+- [docs/tools-reference.md](docs/tools-reference.md) — каталог read-only MCP-инструментов.
 - [docs/config-reference.md](docs/config-reference.md) — полная схема `.gofer/config.toml`.
 - [docs/errors.md](docs/errors.md) — JSON-RPC коды.
 - [docs/models.md](docs/models.md) — структуры данных в индексе.
@@ -176,7 +174,7 @@ shared_paths = []
 **Архитектура и эксплуатация:**
 - [docs/architecture.md](docs/architecture.md) — компоненты, pipeline, JSON-RPC, миграции, глоссарий, таблица лимитов.
 - [docs/performance.md](docs/performance.md) — RAM/диск/latency, тюнинг.
-- [docs/security.md](docs/security.md) — границы доверия, sandbox, IPC.
+- [docs/security.md](docs/security.md) — границы доверия, IPC.
 - [docs/logging.md](docs/logging.md) — формат tracing, фильтры, Loki/Vector.
 - [docs/troubleshooting.md](docs/troubleshooting.md) — типичные проблемы.
 - [docs/faq.md](docs/faq.md) — короткие ответы.
@@ -189,4 +187,4 @@ shared_paths = []
 
 ## Статус
 
-Pet-проект, активная разработка. Phase 0 (Foundation) в основном выполнен, Phase 1–5 (runtime context, production intel, security, multi-version, sandbox) — в планах. API инструментов и схемы конфигов могут меняться без обещаний совместимости.
+Pet-проект, активная разработка. Сфокусирован как **read-only поисковик/навигатор**: инструменты мутаций кода, выполнения кода (sandbox), транзакций, корзины, CAS-буфера и весь языковой слой (LSP + язык-сервисы) удалены. API инструментов и схемы конфигов могут меняться без обещаний совместимости.
