@@ -682,5 +682,91 @@ pub fn core_tools_list() -> Vec<Value> {
                 "required": ["path"]
             }
         }),
+        // Project stats & Vue
+        json!({
+            "name": "domain_stats",
+            "description": "Show symbol count breakdown by domain/directory. Returns a map of domain paths to their symbol counts.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
+        json!({
+            "name": "get_vue_tree",
+            "description": "Get the Vue component tree for a .vue file. Returns the parent-child component relationships extracted from the index.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "file": { "type": "string", "description": "Path to the .vue file (relative to project root)" }
+                },
+                "required": ["file"]
+            }
+        }),
+        // Lightweight existence checks
+        json!({
+            "name": "file_exists",
+            "description": "Check whether a file exists in the project. Cheaper than read_file for existence-only checks.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "file": { "type": "string", "description": "File path relative to project root" }
+                },
+                "required": ["file"]
+            }
+        }),
+        json!({
+            "name": "symbol_exists",
+            "description": "Check whether a named symbol exists in the index. Optionally scoped to a single file for disambiguation.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "symbol": { "type": "string", "description": "Symbol name to look up" },
+                    "file": { "type": "string", "description": "Restrict check to this file path (optional)" }
+                },
+                "required": ["symbol"]
+            }
+        }),
+        json!({
+            "name": "is_exported",
+            "description": "Check whether a symbol is exported/public. Uses signature heuristics (pub, export keywords) to determine visibility.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "symbol": { "type": "string", "description": "Symbol name to check" },
+                    "file": { "type": "string", "description": "File path to disambiguate when the symbol name is not unique (optional)" }
+                },
+                "required": ["symbol"]
+            }
+        }),
+        // Diagnostics
+        json!({
+            "name": "has_tests_for",
+            "description": "Check whether a test file exists for a given source file. Looks for common naming conventions (.test.ts, .spec.ts, _test.rs, test_*.py, etc.).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "file": { "type": "string", "description": "Source file path relative to project root" }
+                },
+                "required": ["file"]
+            }
+        }),
+        json!({
+            "name": "get_config_keys",
+            "description": "List all configuration keys with their data types, sources, and required status.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
+        // Index quality
+        json!({
+            "name": "validate_index",
+            "description": "Validate index integrity: detect files missing symbols, orphaned data, failed indexing, broken references, and embedding gaps. Returns issues with severity and remediation recommendations.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
+        json!({
+            "name": "get_cache_stats",
+            "description": "Get in-memory cache statistics: hit/miss counts, evictions, and current cache size.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
+        json!({
+            "name": "get_query_stats",
+            "description": "Get database query performance metrics: total queries, slow query count and rate, and average query time.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
     ]
 }
