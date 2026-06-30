@@ -1,59 +1,7 @@
-use super::common::{make_relative, resolve_path, ToolContext};
+use super::common::{resolve_path, ToolContext};
 use crate::error::GoferError;
 use anyhow::Result;
 use serde_json::{json, Value};
-
-pub async fn tool_get_errors(args: Value, ctx: &ToolContext) -> Result<Value> {
-    let file = args.get("file").and_then(|v| v.as_str());
-    let severity = args.get("severity").and_then(|v| v.as_str());
-    let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-    let limit = args
-        .get("limit")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(200)
-        .min(500) as u32;
-
-    let resolved_file = file.map(|f| resolve_path(&ctx.root_path, f));
-    let errors = &ctx
-        .sqlite
-        .get_errors(resolved_file.as_deref(), severity, offset, limit)
-        .await?;
-    let count = errors.len() as u32;
-
-    let mut map: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
-    for err in errors {
-        let path = make_relative(&ctx.root_path, &err.file_path);
-        let entry = if let Some(ref sugg) = err.suggestion {
-            format!(
-                "{}:{} [{}] {}: {} (Suggestion: {})",
-                err.line,
-                err.column.unwrap_or(0),
-                err.severity,
-                err.code.as_deref().unwrap_or(""),
-                err.message,
-                sugg
-            )
-        } else {
-            format!(
-                "{}:{} [{}] {}: {}",
-                err.line,
-                err.column.unwrap_or(0),
-                err.severity,
-                err.code.as_deref().unwrap_or(""),
-                err.message
-            )
-        };
-        map.entry(path).or_default().push(entry);
-    }
-
-    Ok(json!({
-        "total": count,
-        "offset": offset,
-        "limit": limit,
-        "has_more": count == limit,
-        "errors": map
-    }))
-}
 
 pub async fn tool_run_diagnostics(args: Value, ctx: &ToolContext) -> Result<Value> {
     use crate::indexer::diagnostics::{self, CargoCheckOptions};

@@ -2,7 +2,6 @@ use serde::Deserialize;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::process::Command as TokioCommand;
 use tokio::sync::Mutex;
 
 use crate::storage::SqliteStorage;
@@ -129,7 +128,7 @@ pub async fn run_cargo_check(
 ) -> anyhow::Result<CheckStatus> {
     let cargo_toml = root.join("Cargo.toml");
     let manifest_override = options.manifest_path.as_ref().map(|p| root.join(p));
-    if !cargo_toml.exists() && manifest_override.as_ref().map(|p| p.exists()).unwrap_or(true) == false {
+    if !cargo_toml.exists() && !manifest_override.as_ref().map(|p| p.exists()).unwrap_or(true) {
         return Ok(CheckStatus::Skipped {
             reason: format!(
                 "no Cargo.toml at {} and manifest_path not found",
@@ -250,118 +249,10 @@ async fn process_cargo_message(
     Ok(())
 }
 
-/// Run tsc --noEmit against every tsconfig.json in the project (root + workspaces).
-///
-/// On a monorepo there is rarely a usable root tsconfig — each package has
-/// its own. Previously this just ran `tsc` in the root with no `-p`, which on
-/// projects without a root tsconfig produced zero diagnostics (tsc help
-/// banner) that we then reported as "0 errors". Now we discover and run each
-/// tsconfig separately.
-pub async fn run_tsc_check(root: &Path, sqlite: &SqliteStorage) -> anyhow::Result<CheckStatus> {
-    let tsconfigs: Vec<std::path::PathBuf> = Vec::new();
-
-    if tsconfigs.is_empty() {
-        return Ok(CheckStatus::Skipped {
-            reason: "no tsconfig.json discovered".to_string(),
-        });
-    }
-
-    let tsc_local = root.join("node_modules/.bin/tsc");
-    let tsc_local_exists = tsc_local.exists();
-
-    let mut error_count = 0;
-    let mut warning_count = 0;
-    let mut ran_any = false;
-    let re = regex::Regex::new(r"^(.+?)\((\d+),(\d+)\):\s*(error|warning)\s+(TS\d+):\s*(.+)$")?;
-
-    for tsconfig in &tsconfigs {
-        let tsconfig_arg = tsconfig.to_string_lossy().to_string();
-        let output = if tsc_local_exists {
-            TokioCommand::new(&tsc_local)
-                .args(["--noEmit", "--pretty", "false", "-p", &tsconfig_arg])
-                .current_dir(root)
-                .output()
-                .await
-        } else {
-            TokioCommand::new("npx")
-                .args([
-                    "--no-install",
-                    "tsc",
-                    "--noEmit",
-                    "--pretty",
-                    "false",
-                    "-p",
-                    &tsconfig_arg,
-                ])
-                .current_dir(root)
-                .output()
-                .await
-        };
-
-        let output = match output {
-            Ok(o) => o,
-            Err(_) => {
-                tracing::warn!("TypeScript compiler not available for {}", tsconfig_arg);
-                continue;
-            }
-        };
-        ran_any = true;
-
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let combined = format!("{}{}", stdout, stderr);
-
-        for line in combined.lines() {
-            if let Some(caps) = re.captures(line) {
-                let file = caps.get(1).map(|m| m.as_str()).unwrap_or("");
-                let line_num: i32 = caps
-                    .get(2)
-                    .and_then(|m| m.as_str().parse().ok())
-                    .unwrap_or(0);
-                let col: i32 = caps
-                    .get(3)
-                    .and_then(|m| m.as_str().parse().ok())
-                    .unwrap_or(0);
-                let severity = caps.get(4).map(|m| m.as_str()).unwrap_or("error");
-                let code = caps.get(5).map(|m| m.as_str()).unwrap_or("");
-                let message = caps.get(6).map(|m| m.as_str()).unwrap_or("");
-
-                if severity == "error" {
-                    error_count += 1;
-                } else {
-                    warning_count += 1;
-                }
-
-                sqlite
-                    .insert_error(
-                        file,
-                        line_num,
-                        Some(col),
-                        severity,
-                        Some(code),
-                        message,
-                        None,
-                    )
-                    .await?;
-            }
-        }
-    }
-
-    if !ran_any {
-        return Ok(CheckStatus::Error {
-            message: "tsc not available (install typescript or run `bun install`)".to_string(),
-        });
-    }
-
-    tracing::info!(
-        "TypeScript check complete: {} errors, {} warnings across {} tsconfigs",
-        error_count,
-        warning_count,
-        tsconfigs.len()
-    );
-    Ok(CheckStatus::Ran {
-        errors: error_count,
-        warnings: warning_count,
+/// TypeScript check is disabled in language-agnostic mode.
+pub async fn run_tsc_check(_root: &Path, _sqlite: &SqliteStorage) -> anyhow::Result<CheckStatus> {
+    Ok(CheckStatus::Skipped {
+        reason: "tsc check disabled (language-agnostic mode)".to_string(),
     })
 }
 

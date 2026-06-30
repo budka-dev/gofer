@@ -17,7 +17,6 @@ pub async fn dispatch(name: &str, args: Value, ctx: &ToolContext) -> Result<Valu
         "get_references" => symbols::tool_get_references(args, ctx).await,
         "get_dependencies" => project::tool_get_dependencies(args, ctx).await,
         "dependency_impact" => project::tool_dependency_impact(args, ctx).await,
-        // "get_errors" => diagnostics::tool_get_errors(args, ctx).await,
         "run_diagnostics" => diagnostics::tool_run_diagnostics(args, ctx).await,
         "get_config_keys" => diagnostics::tool_get_config_keys(ctx).await,
         "get_vue_tree" => project::tool_get_vue_tree(args, ctx).await,
@@ -138,19 +137,6 @@ pub fn core_tools_list() -> Vec<Value> {
                 "required": ["name"]
             }
         }),
-        // json!({
-        //     "name": "get_errors",
-        //     "description": "Get current compiler errors/warnings from cargo check or tsc. Supports pagination via offset/limit. Returns a token-optimized map clustered by file.",
-        //     "inputSchema": {
-        //         "type": "object",
-        //         "properties": {
-        //             "file": { "type": "string", "description": "Filter errors by file path (optional)" },
-        //             "severity": { "type": "string", "description": "Filter by severity: error, warning (optional)" },
-        //             "offset": { "type": "integer", "description": "Pagination offset (default: 0)", "default": 0 },
-        //             "limit": { "type": "integer", "description": "Max results (default: 200, max: 500)", "default": 200 }
-        //         }
-        //     }
-        // }),
         json!({
             "name": "run_diagnostics",
             "description": "Run cargo check and/or tsc to refresh compiler diagnostics. You can pass options for cargo check to target specific workspaces, packages, or all targets. Pass `file` to filter the diagnostics returned to a single file.",

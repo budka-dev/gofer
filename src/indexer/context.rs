@@ -65,26 +65,13 @@ pub async fn create_bundle(main_path: &Path, max_depth: u32) -> ContextBundle {
     }
 }
 
-/// Resolve a non-relative import (alias, workspace package, node_modules).
-/// Walks up from `from_file` to find a project root (package.json or
-/// tsconfig.json) and delegates to the TS-aware resolver in
-/// `languages::typescript`. For non-TS languages we return None — bare imports
-/// in Rust/Python/Go aren't usually resolvable to a single file in the bundle
-/// model anyway.
+/// Non-relative imports (aliases, workspace packages, node_modules) are not
+/// resolved in language-agnostic mode.
 async fn resolve_non_relative_import(
     _import_path: &str,
     _from_file: &Path,
-    language: SupportedLanguage,
+    _language: SupportedLanguage,
 ) -> Option<PathBuf> {
-    if !matches!(
-        language.name(),
-        SupportedLanguage::TYPESCRIPT
-            | SupportedLanguage::JAVASCRIPT
-            | SupportedLanguage::VUE
-    ) {
-        return None;
-    }
-
     None
 }
 

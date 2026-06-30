@@ -17,31 +17,6 @@ pub struct ToolContext {
     pub embedding_circuit: Arc<CircuitBreaker>,
     pub vector_circuit: Arc<CircuitBreaker>,
     pub lang_manager: Arc<crate::indexer::parser::lang_manager::LanguageManager>,
-    pub state: Arc<crate::daemon::state::DaemonState>,
-}
-
-/// Finds the specific project root for a file by traversing upwards looking for root markers.
-pub fn find_project_root(start_path: &Path, markers: &[String], fallback_root: &Path) -> PathBuf {
-    if markers.is_empty() {
-        return fallback_root.to_path_buf();
-    }
-
-    let mut current_dir = if start_path.is_file() {
-        start_path.parent()
-    } else {
-        Some(start_path)
-    };
-
-    while let Some(dir) = current_dir {
-        for marker in markers {
-            if dir.join(marker).exists() {
-                return dir.to_path_buf();
-            }
-        }
-        current_dir = dir.parent();
-    }
-
-    fallback_root.to_path_buf()
 }
 
 /// Резолвинг пути: если путь относительный, превращает в абсолютный через root_path.

@@ -45,9 +45,6 @@ pub struct DaemonState {
     pub vector_circuit: Arc<CircuitBreaker>,
     /// Language manager for tracking and resolving languages
     pub lang_manager: Arc<crate::indexer::parser::lang_manager::LanguageManager>,
-    /// Security approvals for sandbox code execution (id -> (command, oneshot_sender))
-    pub pending_confirmations:
-        Arc<dashmap::DashMap<String, (String, tokio::sync::oneshot::Sender<bool>)>>,
 }
 
 /// Lock-free runtime metrics for the daemon process.
@@ -275,7 +272,6 @@ impl DaemonState {
                     crate::indexer::parser::lang_manager::LanguageManager::new(None, None).unwrap()
                 }),
             ),
-            pending_confirmations: Arc::new(dashmap::DashMap::new()),
         })
     }
 

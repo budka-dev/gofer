@@ -324,25 +324,6 @@ async fn handle_request(req: DaemonRequest, state: &Arc<DaemonState>) -> DaemonR
         "daemon/metrics" => handle_metrics(id, state).await,
         "daemon/shutdown" => handle_shutdown(id, state).await,
         "reindex" => handle_reindex(id, &req.params, state).await,
-        "sandbox/pending_requests" => {
-            let mut list = Vec::new();
-            for entry in state.pending_confirmations.iter() {
-                list.push(json!({
-                    "id": entry.key(),
-                    "command": entry.value().0
-                }));
-            }
-            DaemonResponse::success(id, json!(list))
-        }
-        "sandbox/confirm_response" => {
-            let req_id = req.params.get("id").and_then(|v| v.as_str()).unwrap_or_default();
-            let approved = req.params.get("approved").and_then(|v| v.as_bool()).unwrap_or(false);
-            if let Some((_, (_, tx))) = state.pending_confirmations.remove(req_id) {
-                let _ = tx.send(approved);
-            }
-            DaemonResponse::success(id, Value::Null)
-        }
-
         // === MCP protocol methods ===
         "initialize" => DaemonResponse::success(
             id,
@@ -652,7 +633,6 @@ async fn handle_tools_call(
         embedding_circuit: Arc::clone(&state.embedding_circuit),
         vector_circuit: Arc::clone(&state.vector_circuit),
         lang_manager: Arc::clone(&state.lang_manager),
-        state: Arc::clone(state),
     };
 
     // Core tools
@@ -763,10 +743,9 @@ async fn handle_resources_read(
         embedder: Arc::clone(&project.embedder),
         root_path: Arc::new(project.path.clone()),
         cache: Arc::clone(&project.cache),
-        embedding_circuit: Arc::clone(&state.embedding_circuit), // Feature 016
-        vector_circuit: Arc::clone(&state.vector_circuit),       // Feature 016
+        embedding_circuit: Arc::clone(&state.embedding_circuit),
+        vector_circuit: Arc::clone(&state.vector_circuit),
         lang_manager: Arc::clone(&state.lang_manager),
-        state: Arc::clone(state),
     };
 
     let result = match uri {
@@ -917,10 +896,9 @@ async fn handle_prompts_get(
         embedder: Arc::clone(&project.embedder),
         root_path: Arc::new(project.path.clone()),
         cache: Arc::clone(&project.cache),
-        embedding_circuit: Arc::clone(&state.embedding_circuit), // Feature 016
-        vector_circuit: Arc::clone(&state.vector_circuit),       // Feature 016
+        embedding_circuit: Arc::clone(&state.embedding_circuit),
+        vector_circuit: Arc::clone(&state.vector_circuit),
         lang_manager: Arc::clone(&state.lang_manager),
-        state: Arc::clone(state),
     };
 
     let result = match name {
