@@ -606,29 +606,10 @@ async fn handle_reindex(id: Value, params: &Value, state: &Arc<DaemonState>) -> 
 
 async fn handle_tools_list(
     id: Value,
-    req: &DaemonRequest,
-    state: &Arc<DaemonState>,
+    _req: &DaemonRequest,
+    _state: &Arc<DaemonState>,
 ) -> DaemonResponse {
-    // Try to load project for language-specific tools
-    let project_path = req.project_path();
-
-    let mut tool_list = tools::core_tools_list();
-
-    // Append language-specific tools if we have a project context
-    if let Some(pp) = project_path {
-        if let Ok(project) = state.get_or_load_project(pp).await {
-            for svc in project.language_services.iter() {
-                for def in svc.tools() {
-                    tool_list.push(json!({
-                        "name": def.name,
-                        "description": def.description,
-                        "inputSchema": def.input_schema,
-                    }));
-                }
-            }
-        }
-    }
-
+    let tool_list = tools::core_tools_list();
     DaemonResponse::success(id, json!({ "tools": tool_list }))
 }
 
@@ -675,29 +656,6 @@ async fn handle_tools_call(
         language_services: Arc::clone(&project.language_services),
         state: Arc::clone(state),
     };
-
-    // Try language services first
-    for svc in project.language_services.iter() {
-        if svc.tools().iter().any(|t| t.name == name) {
-            let result = svc.call_tool(name, args, &ctx).await;
-            return match result {
-                Ok(text) => DaemonResponse::success(
-                    id,
-                    json!({ "content": [{"type": "text", "text": text}] }),
-                ),
-                Err(e) => {
-                    tracing::error!("Tool Error [{}]: {}", name, e);
-                    DaemonResponse::success(
-                        id,
-                        json!({
-                            "content": [{"type": "text", "text": format!("Error: {}", e)}],
-                            "isError": true
-                        }),
-                    )
-                }
-            };
-        }
-    }
 
     // Core tools
     let start = std::time::Instant::now();
