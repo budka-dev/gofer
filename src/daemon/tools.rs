@@ -17,35 +17,26 @@ pub async fn dispatch(name: &str, args: Value, ctx: &ToolContext) -> Result<Valu
         "get_references" => symbols::tool_get_references(args, ctx).await,
         "get_dependencies" => project::tool_get_dependencies(args, ctx).await,
         "dependency_impact" => project::tool_dependency_impact(args, ctx).await,
-        "get_config_keys" => diagnostics::tool_get_config_keys(ctx).await,
         "get_vue_tree" => project::tool_get_vue_tree(args, ctx).await,
-        "git_blame" => git::tool_git_blame(args, ctx).await,
-        "git_history" => git::tool_git_history(args, ctx).await,
         "context_bundle" => files::tool_context_bundle(args, ctx).await,
 
         "domain_stats" => project::tool_domain_stats(ctx).await,
 
         "search_by_purpose" => search::tool_search_by_purpose(args, ctx).await,
         "structural_search" => structural::tool_structural_search(args, ctx).await,
-        "complexity" => complexity::tool_complexity(args, ctx).await,
-        "find_unreachable" => unreachable::tool_find_unreachable(args, ctx).await,
         "skeleton" => files::tool_skeleton(args, ctx).await,
         "read_file" => files::tool_read_file(args, ctx).await,
         "project_tree" => project::tool_project_tree(args, ctx).await,
         "search_symbols" => symbols::tool_search_symbols(args, ctx).await,
         "grep" => files::tool_grep(args, ctx).await,
         "find_files" => files::tool_find_files(args, ctx).await,
-        "git_diff" => git::tool_git_diff(args, ctx).await,
         "get_callers" => symbols::tool_get_callers(args, ctx).await,
         "get_callees" => symbols::tool_get_callees(args, ctx).await,
-        "health_check" => diagnostics::tool_health_check(ctx).await,
         // Phase 0: Index Quality & Token Efficiency
         "get_index_status" => index::tool_get_index_status(ctx).await,
         "validate_index" => index::tool_validate_index(ctx).await,
-        "force_reindex" => index::tool_force_reindex(args, ctx).await,
         "file_exists" => files::tool_file_exists(args, ctx).await,
         "symbol_exists" => symbols::tool_symbol_exists(args, ctx).await,
-        "has_tests_for" => diagnostics::tool_has_tests_for(args, ctx).await,
         "is_exported" => symbols::tool_is_exported(args, ctx).await,
         "find_unused_symbols" => symbols::tool_find_unused_symbols(args, ctx).await,
         "find_unused_imports" => files::tool_find_unused_imports(args, ctx).await,
@@ -53,9 +44,6 @@ pub async fn dispatch(name: &str, args: Value, ctx: &ToolContext) -> Result<Valu
         "find_implementations" => symbols::tool_find_implementations(args, ctx).await,
         "call_path" => symbols::tool_call_path(args, ctx).await,
         "dependency_subgraph" => symbols::tool_dependency_subgraph(args, ctx).await,
-        "suggest_commit" => git::tool_suggest_commit(args, ctx).await,
-        "get_cache_stats" => index::tool_get_cache_stats(ctx).await,
-        "get_query_stats" => index::tool_get_query_stats(ctx).await,
         "read_function_context" => files::tool_read_function_context(args, ctx).await,
         "read_types_only" => files::tool_read_types_only(args, ctx).await,
         "smart_file_selection" => search::tool_smart_file_selection(args, ctx).await,
@@ -134,32 +122,6 @@ pub fn core_tools_list() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "git_blame",
-            "description": "Get git blame for a single line or a range. Pass `line` for one line, or `start_line`+`end_line` for a span. Returns one entry per blame hunk with `lines_in_hunk` so the caller can see how far each commit's authorship extends.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "file": { "type": "string", "description": "File path" },
-                    "line": { "type": "integer", "description": "Single line (legacy; use start_line/end_line for ranges)" },
-                    "start_line": { "type": "integer", "description": "First line of the range to blame (1-based, inclusive)" },
-                    "end_line": { "type": "integer", "description": "Last line of the range to blame (1-based, inclusive). Defaults to start_line." }
-                },
-                "required": ["file"]
-            }
-        }),
-        json!({
-            "name": "git_history",
-            "description": "Get recent commit history for a file.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "file": { "type": "string", "description": "File path" },
-                    "limit": { "type": "integer", "description": "Max commits to return (default: 10)", "default": 10 }
-                },
-                "required": ["file"]
-            }
-        }),
-        json!({
             "name": "context_bundle",
             "description": "Build a context bundle for a file, resolving its import dependencies recursively. Use skeleton=true to skeletonize everything, or skeleton_deps_only=true to keep main file full but skeletonize dependencies (saves tokens while preserving target context).",
             "inputSchema": {
@@ -197,32 +159,6 @@ pub fn core_tools_list() -> Vec<Value> {
                     "path": { "type": "string", "description": "Subdirectory to search in (relative to project root)" },
                     "max_results": { "type": "integer", "description": "Cap on returned hits (default 200, max 2000)", "default": 200 },
                     "include_text": { "type": "boolean", "description": "Include the matched code snippet (truncated to 200 chars). Default: true.", "default": true }
-                }
-            }
-        }),
-        json!({
-            "name": "complexity",
-            "description": "Cyclomatic complexity + size metrics per function (McCabe: 1 + decision points). Counts branches (if/elif, match/switch arms, loops, except/catch), short-circuit operators (&&, ||, ??), and ternaries. Also reports line count, param count, max nesting depth. Use to find refactor candidates and likely bug sites. Ratings: 1-5 simple, 6-10 moderate, 11-20 complex, 21+ very_complex. Nested closures count toward the enclosing fn; nested named functions get their own entry.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "file": { "type": "string", "description": "Analyze a single file (relative path). Mutually exclusive with `path`." },
-                    "path": { "type": "string", "description": "Analyze all files under this subdirectory (default: whole project)" },
-                    "min_complexity": { "type": "integer", "description": "Only return functions with complexity >= this (default 1 = all)", "default": 1 },
-                    "sort": { "type": "string", "enum": ["complexity", "lines", "nesting", "name"], "description": "Sort order (default: complexity desc)", "default": "complexity" },
-                    "limit": { "type": "integer", "description": "Max functions to return (default 100, max 1000)", "default": 100 }
-                }
-            }
-        }),
-        json!({
-            "name": "find_unreachable",
-            "description": "Detect statically unreachable code: statements that follow an unconditional terminator (return / break / continue / throw / raise / panic!/unreachable!/todo!/unimplemented!) in the same block. Only direct siblings count — a `return` inside an `if` branch does NOT flag code after the `if` (that's reachable when the condition is false), so false positives are near zero. Out of scope: unreachable match arms after a catch-all, always-false conditions.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "file": { "type": "string", "description": "Analyze a single file (relative path). Mutually exclusive with `path`." },
-                    "path": { "type": "string", "description": "Analyze all files under this subdirectory (default: whole project)" },
-                    "limit": { "type": "integer", "description": "Max findings to return (default 200, max 2000)", "default": 200 }
                 }
             }
         }),
@@ -420,17 +356,6 @@ pub fn core_tools_list() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "git_diff",
-            "description": "Show git diff for staged or unstaged changes.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "file": { "type": "string", "description": "File path (relative) to show diff for a specific file" },
-                    "staged": { "type": "boolean", "description": "Show staged changes instead of unstaged (default: false)", "default": false }
-                }
-            }
-        }),
-        json!({
             "name": "get_callers",
             "description": "Find all symbols that call/reference a given symbol (incoming references). Returns a token-optimized flat string array.",
             "inputSchema": {
@@ -453,62 +378,13 @@ pub fn core_tools_list() -> Vec<Value> {
                 "required": ["symbol"]
             }
         }),
-        json!({
-            "name": "health_check",
-            "description": "Check the health status of all gofer components: database, vector store, embedder. Returns detailed status for each component.",
-            "inputSchema": { "type": "object", "properties": {} }
-        }),
         // Phase 0: Index Quality & Visibility
         json!({
             "name": "get_index_status",
             "description": "Get current index status with completeness metrics, file counts, and last sync information. Returns token-optimized status summaries.",
             "inputSchema": { "type": "object", "properties": {} }
         }),
-        json!({
-            "name": "force_reindex",
-            "description": "Force reindex of file(s) with priority. Useful when index is stale or incomplete. Supports file, directory, or full project scope.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "scope": {
-                        "type": "string",
-                        "enum": ["file", "directory", "project"],
-                        "description": "Scope of reindexing: single file, directory, or entire project",
-                        "default": "file"
-                    },
-                    "path": {
-                        "type": "string",
-                        "description": "File or directory path (required for file/directory scope)"
-                    }
-                }
-            }
-        }),
         // Phase 0: Lightweight Checks (Token Efficient)
-        json!({
-            "name": "suggest_commit",
-            "description": "Generate intelligent commit message based on git changes. Analyzes diff and suggests Conventional Commits format with safety checks.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "style": {
-                        "type": "string",
-                        "enum": ["conventional", "simple", "detailed"],
-                        "default": "conventional",
-                        "description": "Commit message style"
-                    },
-                    "include_emoji": {
-                        "type": "boolean",
-                        "default": true,
-                        "description": "Add emoji to subject line (✨ feat, 🐛 fix, etc.)"
-                    },
-                    "max_subject_length": {
-                        "type": "integer",
-                        "default": 72,
-                        "description": "Maximum subject line length"
-                    }
-                }
-            }
-        }),
         json!({
             "name": "read_function_context",
             "description": "Extract a single function with its dependencies (imports, types, called functions). Saves 90-95% tokens vs read_file by providing only relevant context.",
@@ -735,37 +611,10 @@ pub fn core_tools_list() -> Vec<Value> {
                 "required": ["symbol"]
             }
         }),
-        // Diagnostics
-        json!({
-            "name": "has_tests_for",
-            "description": "Check whether a test file exists for a given source file. Looks for common naming conventions (.test.ts, .spec.ts, _test.rs, test_*.py, etc.).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "file": { "type": "string", "description": "Source file path relative to project root" }
-                },
-                "required": ["file"]
-            }
-        }),
-        json!({
-            "name": "get_config_keys",
-            "description": "List all configuration keys with their data types, sources, and required status.",
-            "inputSchema": { "type": "object", "properties": {} }
-        }),
         // Index quality
         json!({
             "name": "validate_index",
             "description": "Validate index integrity: detect files missing symbols, orphaned data, failed indexing, broken references, and embedding gaps. Returns issues with severity and remediation recommendations.",
-            "inputSchema": { "type": "object", "properties": {} }
-        }),
-        json!({
-            "name": "get_cache_stats",
-            "description": "Get in-memory cache statistics: hit/miss counts, evictions, and current cache size.",
-            "inputSchema": { "type": "object", "properties": {} }
-        }),
-        json!({
-            "name": "get_query_stats",
-            "description": "Get database query performance metrics: total queries, slow query count and rate, and average query time.",
             "inputSchema": { "type": "object", "properties": {} }
         }),
     ]

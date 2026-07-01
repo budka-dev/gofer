@@ -1,7 +1,6 @@
 pub mod context;
 pub mod domains;
 pub mod embedder;
-pub mod git;
 
 pub mod parser;
 pub mod pipeline;

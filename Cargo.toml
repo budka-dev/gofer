@@ -33,9 +33,6 @@ notify = "7"
 notify-debouncer-mini = "0.5"
 ignore = "0.4"
 
-# Git
-git2 = "0.20"
-
 # Async trait
 async-trait = "0.1"
 

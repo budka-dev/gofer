@@ -234,10 +234,6 @@ impl EmbedderPool {
         self.model_dimension
     }
 
-    pub fn model_name(&self) -> &str {
-        &self.model_name
-    }
-
     pub fn cache_version_key(&self) -> String {
         format!("{}:{}", self.model_name, self.model_dimension)
     }
@@ -272,21 +268,6 @@ mod tests {
         };
         let pool = EmbedderPool::with_config(1, &config).unwrap();
         assert_eq!(pool.dimension(), 1024);
-    }
-
-    #[test]
-    fn test_model_name() {
-        let config = EmbeddingConfig {
-            provider: "external".to_string(),
-            batch_size: 32,
-            pool_size: 1,
-            external_url: None,
-            external_api_key: None,
-            external_model: Some("BAAI/bge-m3".to_string()),
-            dimensions: Some(1024),
-        };
-        let pool = EmbedderPool::with_config(1, &config).unwrap();
-        assert_eq!(pool.model_name(), "BAAI/bge-m3");
     }
 
     #[test]

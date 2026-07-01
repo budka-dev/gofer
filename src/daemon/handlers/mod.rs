@@ -1,13 +1,9 @@
 pub mod batch;
-pub mod complexity;
 pub mod common;
-pub mod diagnostics;
 pub mod file_ops;
 pub mod files;
-pub mod git;
 pub mod index;
 pub mod project;
 pub mod search;
 pub mod structural;
 pub mod symbols;
-pub mod unreachable;

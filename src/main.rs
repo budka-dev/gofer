@@ -2,7 +2,6 @@
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 mod cache; // Feature 008: server-side LRU cache
-mod commit;
 mod daemon;
 mod error;
 mod error_recovery; // Feature 016: graceful error handling & recovery

@@ -85,13 +85,6 @@ impl QueryMetrics {
         }
     }
 
-    pub fn get_stats(&self) -> (u64, u64, u64) {
-        (
-            self.total_queries.load(Ordering::Relaxed),
-            self.slow_queries.load(Ordering::Relaxed),
-            self.total_query_time_ms.load(Ordering::Relaxed),
-        )
-    }
 }
 
 /// SQLite storage for file tracking and symbol graph
