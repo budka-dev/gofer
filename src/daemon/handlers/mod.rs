@@ -1,5 +1,6 @@
 pub mod batch;
 pub mod common;
+pub mod composite;
 pub mod file_ops;
 pub mod files;
 pub mod index;

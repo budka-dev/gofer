@@ -32,6 +32,7 @@ pub async fn dispatch(name: &str, args: Value, ctx: &ToolContext) -> Result<Valu
         "find_files" => files::tool_find_files(args, ctx).await,
         "get_callers" => symbols::tool_get_callers(args, ctx).await,
         "get_callees" => symbols::tool_get_callees(args, ctx).await,
+        "explain_symbol" => composite::tool_explain_symbol(args, ctx).await,
         // Phase 0: Index Quality & Token Efficiency
         "get_index_status" => index::tool_get_index_status(ctx).await,
         "validate_index" => index::tool_validate_index(ctx).await,
@@ -616,6 +617,19 @@ pub fn core_tools_list() -> Vec<Value> {
             "name": "validate_index",
             "description": "Validate index integrity: detect files missing symbols, orphaned data, failed indexing, broken references, and embedding gaps. Returns issues with severity and remediation recommendations.",
             "inputSchema": { "type": "object", "properties": {} }
+        }),
+        json!({
+            "name": "explain_symbol",
+            "description": "Explain a symbol in one call: definition, signature, callers (count+top), callees, and implementations (for types). Compact projection; full body only with include_bodies. Cheaper than separate get_symbols/get_callers/get_callees calls.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "symbol": { "type": "string", "description": "Symbol name to explain" },
+                    "file": { "type": "string", "description": "Optional file to disambiguate when the name is defined in multiple places" },
+                    "include_bodies": { "type": "boolean", "description": "Include the full definition body (default false)", "default": false }
+                },
+                "required": ["symbol"]
+            }
         }),
     ]
 }
