@@ -170,6 +170,7 @@ impl LanguageManager {
 
     /// Tries to resolve a language by file extension. 
     /// If the language is not loaded yet, but exists on disk, it will load it.
+    #[allow(dead_code)] // used by tests; extension→lang map kept for tooling
     pub fn get_language_by_ext(&self, ext: &str) -> Option<String> {
         if let Some(lang_name) = self.ext_to_lang.get(ext) {
             return Some(lang_name.clone());

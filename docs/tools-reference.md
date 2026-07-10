@@ -4,6 +4,9 @@
 
 gofer — **read-only** поисковик/навигатор. Он не изменяет файлы, не выполняет код и не поднимает внешние процессы (кроме HTTP-эмбеддера при индексации и загрузки wasm-грамматик). Мутации и рефакторинг делегируются хост-агенту.
 
+Поверхность инструментов сужена до **индекса + поиска + компактного чтения**. Analysis/lint/impact/graph-BFS и answer-helpers сняты: сборку ответа делает хост-агент.
+
+
 В таблицах:
 
 - **Обязательные параметры** выделены `**жирным**`.
@@ -35,13 +38,8 @@ gofer — **read-only** поисковик/навигатор. Он не изм�
 | Инструмент | Аргументы | Что делает |
 |---|---|---|
 | `search` | **query**, `limit` (10), `path`, `glob`, `include_scores` (false), `preview_mode` (false), `min_score` (0.0), `include_context` (true) | Гибридный семантический поиск (BM25 + векторы + re-rank). `preview_mode=true` экономит ~80% токенов. |
-| `search_by_purpose` | **query**, `limit` (10) | Поиск по высокоуровневому назначению (роль, ответственность). Подходит для архитектурных вопросов вроде «auth», «billing». |
-| `smart_file_selection` | **query**, `limit` (5), `min_score` (0.3), `boost_recency` (0.2) | Ранжированный список файлов, релевантных задаче. Помогает выбрать, что читать дальше. |
 | `search_symbols` | **query**, `kind`, `limit` (20) | Поиск символов по имени или подстроке. |
 | `grep` | **pattern**, `path`, `glob` (только `*.<ext>`), `case_insensitive` (false), `context_lines` (0), `max_results` (100) | Regex по содержимому файлов. Возвращает карту совпадений по файлам. С `context_lines > 0` отдаёт строки до/после совпадения. |
-| `find_unreachable` | `file` ИЛИ `path`, `limit` (200, max 2000) | Статически недостижимый код: операторы после безусловного терминатора (`return`/`break`/`continue`/`throw`/`raise`/`panic!`/`unreachable!`/`todo!`/`unimplemented!`) в том же блоке. Только прямые сиблинги — `return` внутри `if`-ветки **не** флагает код после `if`, поэтому false positives около нуля. Возвращает `unreachable[]` (с `file`/`line`/`kind`/`code`/`reason`). Вне скоупа: недостижимые match-arms после catch-all, always-false условия. |
-| `complexity` | `file` ИЛИ `path`, `min_complexity` (1), `sort` (`complexity`/`lines`/`nesting`/`name`), `limit` (100, max 1000) | Цикломатическая сложность (McCabe: 1 + decision points) + size-метрики на функцию. Считает ветвления (if/elif, match/switch arms, циклы, except/catch), short-circuit операторы (`&&`/`\|\|`/`??`), тернарники. Плюс `lines`/`params`/`max_nesting`. Рейтинги: 1-5 simple, 6-10 moderate, 11-20 complex, 21+ very_complex. Вложенные замыкания идут в счёт обрамляющей функции; вложенные именованные функции — отдельные записи. Возвращает `functions[]`, `stats` (avg/max), `total_functions`. |
-| `structural_search` | `preset` ∈ (см. ниже), `query` + **language**, `path`, `max_results` (200, max 2000), `include_text` (true) | Поиск по AST-форме, не regex. Без аргументов отдаёт каталог пресетов. Пресеты: **rust** — `rust_unwrap`, `rust_expect`, `rust_panic`, `rust_todo_unimplemented`, `rust_dbg`, `rust_println`, `rust_clone`; **typescript** — `ts_any`, `ts_console_log`, `ts_ts_ignore`, `ts_debugger`, `ts_non_null`; **python** — `py_print`, `py_bare_except`, `py_breakpoint`; **go** — `go_panic`, `go_fmt_print`. Custom S-expression — через `query` + `language`. Возвращает `hits[]` с `file`/`line_start`/`line_end`/`col_start`/`col_end`/`text`. Игнорирует комменты и строки на уровне синтаксиса, поэтому в разы точнее `grep`. |
 
 ## Чтение файлов
 
@@ -71,20 +69,13 @@ gofer — **read-only** поисковик/навигатор. Он не изм�
 | `get_callers` | **symbol** | Входящие вызовы — кто зовёт этот символ. |
 | `get_callees` | **symbol**, `file` | Исходящие вызовы — кого зовёт этот символ. |
 | `symbol_exists` | **symbol**, `file` | Дешёвый булев чек по индексу. С `file` ищется внутри файла, без — глобально (`search_symbols(limit=1)`). |
-| `is_exported` | **symbol**, `file` | Эвристика: смотрит сигнатуру (`pub`/`export`/имя без подчёркивания и kind ≠ LocalVar). Возвращает `is_exported` + `locations`. |
-| `find_unused_symbols` | `kind`, `file`, `public_only` (true), `exclude_tests` (true), `exclude_entry_points` (true), `exclude_exports` (true), `limit` (100, max 500) | Символы без incoming `call`/`usage`/`inherit`/`type_usage` ссылок. Walks `symbol_references` (по `target_symbol_id` и `target_name`). Applied heuristics: тесты — по пути И по атрибутам в signature (`#[test]`, `#[tokio::test]`, `#[bench]`, `#[cfg(test)]`, `@pytest.fixture`) И по имени (`test_*`/`*_test`); entry points — `main`/`__main__`/`lambda_handler`/`handler`; экспорты — `#[no_mangle]`/`extern "C"`/`#[wasm_bindgen]`/`#[pyfunction]`/`#[napi]`/`@customElement`/`@Component`. **Caveats:** граф язык-агностичен; attribute/decorator-фильтрация работает для Rust (`#[test]`), Python (`@pytest.fixture`) и TS (`@Component`) — декораторы попадают в signature. Go — без attribute-маркеров (path+naming). Внешние API-потребители невидимы (`public_only=false`); trait/dyn dispatch не отслеживается; attribute-фильтрация на свежем индексе — старый требует `force_reindex`. |
 | `find_by_type_signature` | `returns`, `param_type`, `signature_contains` (хотя бы один), `kind`, `file`, `limit` (100, max 500) | Поиск функций/методов по сигнатуре — region-aware. `returns` матчит **только return-зону** (не сматчит параметр того же типа), `param_type` — **только зону параметров**, `signature_contains` — raw substring по всей сигнатуре. Case-sensitive подстроки: `Result<MyType` ловит `Result<MyType, Error>`. Coarse SQL LIKE + refine через `split_signature` (первая top-level `(...)` = params, после неё `->`/`:`/bare = return). **Caveats:** Go receiver попадает в params-зону; Rust where-clause — в return-зону; нужен свежий индекс. |
-| `call_path` | **from**, **to**, `direction` (`calls`/`called_by`, default `calls`), `file_from`, `file_to`, `max_depth` (8, max 30), `max_paths` (5, max 50) | BFS поверх `symbol_references` между двумя символами. `calls` — `from` транзитивно вызывает `to` через outgoing edges; `called_by` — `from` достижим из `to` через incoming. Возвращает `paths[]` (каждый — список `{symbol, kind, file, line, incoming_edge}`), `shortest_length`. Unresolved refs резолвятся через `get_symbol_by_name` (cap 16 кандидатов на ребро). **Caveats:** один shortest path на цель, alternatives не перечисляются; dyn/trait dispatch не моделируется; на общих именах вроде `new` могут быть ложные ветки. |
-| `dependency_subgraph` | **symbol**, `file`, `direction` (`out`/`in`/`both`, default `out`), `max_depth` (3, max 20), `max_nodes` (50, max 500) | BFS-окрестность символа по `symbol_references`. `out` — зависимости, `in` — зависимые, `both` — объединение. Возвращает `nodes[]` + `edges[]` в пределах глубины. В отличие от `call_path` (путь к цели) — весь достижимый подграф, для impact-анализа и «blast radius». Edges с обрезанными при truncation концами отбрасываются. |
 | `find_implementations` | **name**, `limit` (100, max 500) | Реализации trait/interface/base по имени, кросс-язычно. Rust `impl <Name> for <Type>` (только trait-позиция — тип не сматчится), TS `implements`/`extends`, Python базовые классы. Whole-token матчинг (`Foo` ≠ `FooBar`). Возвращает `implementations[]` (`type`/`kind`/`relation`/`file`/`line`). **Go не поддержан** — satisfaction интерфейсов структурный, не декларируется. |
-| `find_unused_imports` | **file**, `include_reexports` (false) | Импорты в файле, локальное имя которых нигде в этом же файле не используется. Парсит импорты через tree-sitter (Rust/TS/Python/Go), word-boundary regex по строкам **вне импорт-зоны**. Skips wildcards (`use foo::*`, `from foo import *`, Go `_`/`.` импорты). По умолчанию skip `pub use` (re-exports) — переключить через `include_reexports=true`. Возвращает `unused_imports[]` (с `name`/`source`/`line`), `total_items_checked`, `total_unused`, `skipped_wildcards`, `skipped_reexports`. **Caveats:** false positives, если идентификатор используется только через макрос-склейку (`paste!`, `concat_idents!`); false negatives, если локальное имя совпадает с не-связанным методом другого типа. |
 
 ## Зависимости проекта
 
 | Инструмент | Аргументы | Что делает |
 |---|---|---|
-| `get_dependencies` | `ecosystem` (`cargo` / `npm`) | Зависимости из `Cargo.toml`/`package.json` с версиями. |
-| `dependency_impact` | **name** | Файлы, которые используют указанную зависимость. |
 
 ## Git
 
@@ -99,8 +90,6 @@ gofer — **read-only** поисковик/навигатор. Он не изм�
 
 | Инструмент | Аргументы | Что делает |
 |---|---|---|
-| `domain_stats` | — | Сводка по доменам (`backend`/`frontend`/`ops`/…): количество файлов на каждый домен. |
-| `get_vue_tree` | **file** | Иерархия Vue-компонента (template tree), сохранённая при индексации. Возвращает `tree` или `null` с сообщением, если файл не проиндексирован. |
 | `get_config_keys` | — | Конфиг-ключи проекта из индекса: `key (type) src:source [required]`. |
 
 ## Индекс и обслуживание

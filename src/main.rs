@@ -10,8 +10,7 @@ mod ipc;
 mod logger;
 mod models;
 mod resource_limits; // Feature 015: connection pooling & resource management
-mod scoring_index;
-mod storage; // rkyv-based hot index for file scoring
+mod storage;
 use std::path::PathBuf;
 use std::sync::Arc;
 

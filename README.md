@@ -12,7 +12,7 @@
 - Stdio-мост `gofer mcp`, который подключают MCP-клиенты (Claude Code, Qoder и др.).
 - Гибридное хранилище: SQLite для метаданных и символов, LanceDB для векторов.
 - AST через tree-sitter с динамически загружаемыми wasm-грамматиками (`gofer install-lang <name>`).
-- ~42 read-only MCP-инструмента: поиск, чтение (skeleton/context_bundle), символы и граф вызовов, git, диагностика индекса, batch. Все язык-агностичны — работают на собственном индексе, без внешних language servers.
+- ~23 read-only MCP-инструмента: поиск, чтение (skeleton/context_bundle), символы и граф вызовов, git, диагностика индекса, batch. Все язык-агностичны — работают на собственном индексе, без внешних language servers.
 
 Подробнее: [docs/](docs/).
 

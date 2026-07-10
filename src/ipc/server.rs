@@ -682,20 +682,13 @@ async fn handle_tools_call(
 
 async fn handle_resources_list(
     id: Value,
-    req: &DaemonRequest,
+    _req: &DaemonRequest,
     _state: &Arc<DaemonState>,
 ) -> DaemonResponse {
-    let _ = req;
     DaemonResponse::success(
         id,
         json!({
             "resources": [
-                {
-                    "uri": "project://context",
-                    "name": "Project Context",
-                    "description": "Full project context: rules, golden samples, dependencies",
-                    "mimeType": "application/json"
-                },
                 {
                     "uri": "project://tree",
                     "name": "Project Tree",
@@ -705,13 +698,7 @@ async fn handle_resources_list(
                 {
                     "uri": "project://stats",
                     "name": "Project Stats",
-                    "description": "Code statistics: file count, symbols, domain distribution",
-                    "mimeType": "application/json"
-                },
-                {
-                    "uri": "project://config",
-                    "name": "Project Config",
-                    "description": "Discovered configuration keys from .env.example files",
+                    "description": "Index stats: file count and symbol counts by kind",
                     "mimeType": "application/json"
                 }
             ]
@@ -747,10 +734,8 @@ async fn handle_resources_read(
     };
 
     let result = match uri {
-        "project://context" => resource_project_context(&ctx).await,
         "project://tree" => tools::dispatch("project_tree", json!({"depth": 3}), &ctx).await,
         "project://stats" => resource_project_stats(&ctx).await,
-        "project://config" => tools::dispatch("get_config_keys", json!({}), &ctx).await,
         _ => {
             return DaemonResponse::error(id, -32602, format!("Unknown resource URI: {}", uri));
         }
@@ -774,66 +759,24 @@ async fn handle_resources_read(
     }
 }
 
-async fn resource_project_context(ctx: &tools::ToolContext) -> anyhow::Result<Value> {
-    use crate::models::chunk::Rule;
-
-    let rules: Vec<Rule> = ctx.sqlite.get_rules().await?;
-    let golden_samples: Vec<(String, Option<String>)> = ctx.sqlite.get_golden_samples().await?;
-    let deps: Vec<crate::models::chunk::Dependency> =
-        ctx.sqlite.get_dependencies_filtered(None).await?;
-
-    Ok(json!({
-        "rules": rules.iter().map(|r| json!({
-            "category": r.category,
-            "rule": r.rule,
-            "priority": r.priority,
-            "source": r.source
-        })).collect::<Vec<_>>(),
-        "golden_samples": golden_samples.iter().map(|(path, cat)| json!({
-            "file": path,
-            "category": cat
-        })).collect::<Vec<_>>(),
-        "dependencies": {
-            "total": deps.len(),
-            "items": deps.iter().map(|d| json!({
-                "name": d.name,
-                "version": d.version,
-                "ecosystem": d.ecosystem,
-                "dev_only": d.dev_only == 1
-            })).collect::<Vec<_>>()
-        }
-    }))
-}
-
 async fn resource_project_stats(ctx: &tools::ToolContext) -> anyhow::Result<Value> {
-    let domain_stats: Vec<(String, i64)> = ctx.sqlite.get_domain_stats().await?;
+    let file_count = ctx.sqlite.get_file_count().await.unwrap_or(0);
     let symbols: Vec<crate::models::chunk::SymbolWithPath> =
         ctx.sqlite.get_symbols(None, None, 0, 10000).await?;
 
-    let errors: Vec<crate::models::chunk::ActiveError> =
-        ctx.sqlite.get_errors(None, None, 0, 10000).await?;
-
-    // Count symbols by kind
     let mut kind_counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for sym in &symbols {
         *kind_counts.entry(sym.kind.as_str()).or_default() += 1;
     }
 
     Ok(json!({
+        "files": file_count,
         "symbols": {
             "total": symbols.len(),
             "by_kind": kind_counts
-        },
-        "summaries": 0,
-        "errors": errors.len(),
-        "domains": domain_stats.iter().map(|(d, c)| json!({
-            "domain": d,
-            "file_count": c
-        })).collect::<Vec<_>>()
+        }
     }))
 }
-
-// === MCP Prompts ===
 
 async fn handle_prompts_list(id: Value) -> DaemonResponse {
     DaemonResponse::success(
@@ -842,7 +785,7 @@ async fn handle_prompts_list(id: Value) -> DaemonResponse {
             "prompts": [
                 {
                     "name": "review_code",
-                    "description": "Generate a code review prompt for a given file, including context bundle and project rules.",
+                    "description": "Generate a code review prompt for a given file, including a context bundle.",
                     "arguments": [
                         { "name": "file", "description": "File to review", "required": true }
                     ]
@@ -919,24 +862,12 @@ async fn prompt_review_code(args: &Value, ctx: &tools::ToolContext) -> anyhow::R
         return Err(anyhow::anyhow!("'file' argument is required"));
     }
 
-    // Get context bundle with skeleton deps
     let bundle: serde_json::Value = tools::dispatch(
         "context_bundle",
         json!({"file": file, "skeleton_deps_only": true, "depth": 2}),
         ctx,
     )
     .await?;
-
-    let rules: Vec<crate::models::chunk::Rule> = ctx.sqlite.get_rules().await?;
-    let rules_text = if rules.is_empty() {
-        "No project rules defined.".to_string()
-    } else {
-        rules
-            .iter()
-            .map(|r| format!("- [{}] (p={}) {}", r.category, r.priority, r.rule))
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
 
     let bundle_text = serde_json::to_string_pretty(&bundle)?;
 
@@ -945,8 +876,8 @@ async fn prompt_review_code(args: &Value, ctx: &tools::ToolContext) -> anyhow::R
         "content": {
             "type": "text",
             "text": format!(
-                "Review the following code file: `{}`\n\n## Project Rules\n{}\n\n## Context Bundle\n```json\n{}\n```\n\nProvide a thorough code review focusing on:\n1. Correctness and potential bugs\n2. Adherence to project rules\n3. Performance concerns\n4. Security issues\n5. Code style and readability",
-                file, rules_text, bundle_text
+                "Review the following code file: `{}`\n\n## Context Bundle\n```json\n{}\n```\n\nProvide a thorough code review focusing on:\n1. Correctness and potential bugs\n2. Performance concerns\n3. Security issues\n4. Code style and readability",
+                file, bundle_text
             )
         }
     })])
@@ -988,22 +919,15 @@ async fn prompt_find_related(args: &Value, ctx: &tools::ToolContext) -> anyhow::
 
     let search_results: serde_json::Value =
         tools::dispatch("search", json!({"query": query, "limit": 10}), ctx).await?;
-    let purpose_results: serde_json::Value = tools::dispatch(
-        "search_by_purpose",
-        json!({"query": query, "limit": 5}),
-        ctx,
-    )
-    .await?;
 
     Ok(vec![json!({
         "role": "user",
         "content": {
             "type": "text",
             "text": format!(
-                "Find all code related to: \"{}\"\n\n## Semantic Search Results\n```json\n{}\n```\n\n## Purpose-Based Results\n```json\n{}\n```\n\nAnalyze these results and:\n1. Identify the key files involved\n2. Map the data/control flow related to this concept\n3. Identify any missing pieces or gaps\n4. Suggest where changes should be made if modifying this feature",
+                "Find all code related to: \"{}\"\n\n## Semantic Search Results\n```json\n{}\n```\n\nAnalyze these results and:\n1. Identify the key files involved\n2. Map the data/control flow related to this concept\n3. Identify any missing pieces or gaps\n4. Suggest where changes should be made if modifying this feature",
                 query,
-                serde_json::to_string_pretty(&search_results)?,
-                serde_json::to_string_pretty(&purpose_results)?
+                serde_json::to_string_pretty(&search_results)?
             )
         }
     })])

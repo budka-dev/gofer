@@ -208,10 +208,6 @@ impl LanceStorage {
         Ok(())
     }
 
-    /// Search for similar code chunks with refine for better accuracy
-    pub async fn search(&self, query_vector: &[f32], limit: usize) -> Result<Vec<SearchHit>> {
-        self.search_with_filter(query_vector, limit, None).await
-    }
 
     pub async fn search_with_filter(
         &self,
@@ -596,7 +592,7 @@ mod tests {
         let (storage, _temp) = create_test_storage().await;
 
         let query = random_vector(TEST_VECTOR_DIM);
-        let results = storage.search(&query, 10).await.unwrap();
+        let results = storage.search_with_filter(&query, 10, None).await.unwrap();
 
         assert!(results.is_empty());
     }
@@ -613,7 +609,7 @@ mod tests {
         storage.upsert_chunks(&chunks, &embeddings).await.unwrap();
 
         let query = random_vector(TEST_VECTOR_DIM);
-        let results = storage.search(&query, 10).await.unwrap();
+        let results = storage.search_with_filter(&query, 10, None).await.unwrap();
 
         assert_eq!(results.len(), 2);
     }
@@ -638,7 +634,7 @@ mod tests {
         storage.upsert_chunks(&chunks, &embeddings).await.unwrap();
 
         let query = random_vector(TEST_VECTOR_DIM);
-        let results = storage.search(&query, 3).await.unwrap();
+        let results = storage.search_with_filter(&query, 3, None).await.unwrap();
 
         assert_eq!(results.len(), 3);
     }
@@ -662,7 +658,7 @@ mod tests {
         storage.upsert_chunks(&chunks, &embeddings).await.unwrap();
 
         // Search with the target embedding - should find "similar" first
-        let results = storage.search(&target_embedding, 2).await.unwrap();
+        let results = storage.search_with_filter(&target_embedding, 2, None).await.unwrap();
 
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].id, "similar");
@@ -680,7 +676,7 @@ mod tests {
             .await
             .unwrap();
 
-        let results = storage.search(&embedding, 1).await.unwrap();
+        let results = storage.search_with_filter(&embedding, 1, None).await.unwrap();
 
         assert_eq!(results.len(), 1);
         let hit = &results[0];
@@ -760,7 +756,7 @@ mod tests {
             .await
             .unwrap();
 
-        let results = storage.search(&embedding, 1).await.unwrap();
+        let results = storage.search_with_filter(&embedding, 1, None).await.unwrap();
         assert_eq!(results[0].content, "// Привет мир! 你好世界");
     }
 

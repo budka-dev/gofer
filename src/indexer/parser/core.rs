@@ -222,8 +222,7 @@ impl CodeParser {
                             .unwrap_or_else(|| node.end_byte());
 
                         // Annotations that precede a definition carry semantic
-                        // markers downstream tools rely on (find_unused_symbols,
-                        // is_exported): test/export/route attributes.
+                        // markers useful for signature-aware search (test/export/route attributes).
                         //   - Rust: sibling `attribute_item` (`#[test]`, …)
                         //   - Python: sibling `decorator` inside a
                         //     `decorated_definition` wrapper (`@pytest.fixture`)

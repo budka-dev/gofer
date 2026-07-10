@@ -15,15 +15,7 @@ pub async fn dispatch(name: &str, args: Value, ctx: &ToolContext) -> Result<Valu
         "search" => search::tool_search(args, ctx).await,
         "get_symbols" => symbols::tool_get_symbols(args, ctx).await,
         "get_references" => symbols::tool_get_references(args, ctx).await,
-        "get_dependencies" => project::tool_get_dependencies(args, ctx).await,
-        "dependency_impact" => project::tool_dependency_impact(args, ctx).await,
-        "get_vue_tree" => project::tool_get_vue_tree(args, ctx).await,
         "context_bundle" => files::tool_context_bundle(args, ctx).await,
-
-        "domain_stats" => project::tool_domain_stats(ctx).await,
-
-        "search_by_purpose" => search::tool_search_by_purpose(args, ctx).await,
-        "structural_search" => structural::tool_structural_search(args, ctx).await,
         "skeleton" => files::tool_skeleton(args, ctx).await,
         "read_file" => files::tool_read_file(args, ctx).await,
         "project_tree" => project::tool_project_tree(args, ctx).await,
@@ -32,24 +24,15 @@ pub async fn dispatch(name: &str, args: Value, ctx: &ToolContext) -> Result<Valu
         "find_files" => files::tool_find_files(args, ctx).await,
         "get_callers" => symbols::tool_get_callers(args, ctx).await,
         "get_callees" => symbols::tool_get_callees(args, ctx).await,
-        "explain_symbol" => composite::tool_explain_symbol(args, ctx).await,
-        // Phase 0: Index Quality & Token Efficiency
         "get_index_status" => index::tool_get_index_status(ctx).await,
         "validate_index" => index::tool_validate_index(ctx).await,
         "file_exists" => files::tool_file_exists(args, ctx).await,
         "symbol_exists" => symbols::tool_symbol_exists(args, ctx).await,
-        "is_exported" => symbols::tool_is_exported(args, ctx).await,
-        "find_unused_symbols" => symbols::tool_find_unused_symbols(args, ctx).await,
-        "find_unused_imports" => files::tool_find_unused_imports(args, ctx).await,
         "find_by_type_signature" => symbols::tool_find_by_type_signature(args, ctx).await,
         "find_implementations" => symbols::tool_find_implementations(args, ctx).await,
-        "call_path" => symbols::tool_call_path(args, ctx).await,
-        "dependency_subgraph" => symbols::tool_dependency_subgraph(args, ctx).await,
         "read_function_context" => files::tool_read_function_context(args, ctx).await,
         "read_types_only" => files::tool_read_types_only(args, ctx).await,
-        "smart_file_selection" => search::tool_smart_file_selection(args, ctx).await,
         "batch_operations" => batch::tool_batch_operations(args, ctx).await,
-        // Phase 1: File Operations
         "list_directory" => file_ops::tool_list_directory(args, ctx).await,
         "get_file_metadata" => file_ops::tool_get_file_metadata(args, ctx).await,
         _ => Err(GoferError::MethodNotFound(name.to_string()).into()),
@@ -102,27 +85,6 @@ pub fn core_tools_list() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "get_dependencies",
-            "description": "List project dependencies from Cargo.toml/package.json with versions. Returns a token-optimized flat string array.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "ecosystem": { "type": "string", "description": "Filter by ecosystem: cargo, npm (optional)" }
-                }
-            }
-        }),
-        json!({
-            "name": "dependency_impact",
-            "description": "Show all files that use a specific dependency. Returns a token-optimized flat string array.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "Dependency name (e.g., 'tokio', 'react')" }
-                },
-                "required": ["name"]
-            }
-        }),
-        json!({
             "name": "context_bundle",
             "description": "Build a context bundle for a file, resolving its import dependencies recursively. Use skeleton=true to skeletonize everything, or skeleton_deps_only=true to keep main file full but skeletonize dependencies (saves tokens while preserving target context).",
             "inputSchema": {
@@ -134,33 +96,6 @@ pub fn core_tools_list() -> Vec<Value> {
                     "skeleton_deps_only": { "type": "boolean", "description": "If true, keep main file full but skeletonize dependencies only", "default": false }
                 },
                 "required": ["file"]
-            }
-        }),
-        json!({
-            "name": "search_by_purpose",
-            "description": "Search files by high-level purpose/responsibility. Best for architectural queries like 'authentication', 'billing logic', 'API routes'.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "query": { "type": "string", "description": "Natural language description of what you're looking for" },
-                    "limit": { "type": "integer", "description": "Maximum results (default: 10)", "default": 10 }
-                },
-                "required": ["query"]
-            }
-        }),
-        json!({
-            "name": "structural_search",
-            "description": "Search code by AST shape, not regex. Use `preset` for curated patterns or `query` + `language` for a custom tree-sitter S-expression. Call without args to list all presets. Presets: Rust (rust_unwrap, rust_expect, rust_panic, rust_todo_unimplemented, rust_dbg, rust_println, rust_clone), TS/JS (ts_any, ts_console_log, ts_ts_ignore, ts_debugger, ts_non_null), Python (py_print, py_bare_except, py_breakpoint), Go (go_panic, go_fmt_print). Returns hits with file/line/col + matched text. Much more precise than grep — comments and strings are ignored; matches respect syntax.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "preset": { "type": "string", "description": "Catalog preset id (see description). Mutually exclusive with `query`." },
-                    "query": { "type": "string", "description": "Custom tree-sitter S-expression. Requires `language`. Use `@hit` capture to mark the node returned in results." },
-                    "language": { "type": "string", "description": "Target language (rust, typescript, python, go, ...). Required with `query`; optional filter with `preset`." },
-                    "path": { "type": "string", "description": "Subdirectory to search in (relative to project root)" },
-                    "max_results": { "type": "integer", "description": "Cap on returned hits (default 200, max 2000)", "default": 200 },
-                    "include_text": { "type": "boolean", "description": "Include the matched code snippet (truncated to 200 chars). Default: true.", "default": true }
-                }
             }
         }),
         json!({
@@ -226,48 +161,6 @@ pub fn core_tools_list() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "call_path",
-            "description": "BFS over symbol_references between two named symbols. `direction=calls` (default): paths where `from` transitively reaches `to` via outgoing calls. `direction=called_by`: paths where `from` is reached by walking incoming references from `to`. Returns shortest paths rendered as `from → ... → to`. Use `file_from`/`file_to` to disambiguate when names collide. Caveats: dyn/trait dispatch isn't tracked; unresolved refs fan out via name lookup (occasional false branches).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "from": { "type": "string", "description": "Source symbol name" },
-                    "to": { "type": "string", "description": "Target symbol name" },
-                    "direction": {
-                        "type": "string",
-                        "enum": ["calls", "called_by"],
-                        "description": "calls = walk outgoing edges; called_by = walk incoming edges",
-                        "default": "calls"
-                    },
-                    "file_from": { "type": "string", "description": "Disambiguate `from` by file path (optional)" },
-                    "file_to": { "type": "string", "description": "Disambiguate `to` by file path (optional)" },
-                    "max_depth": { "type": "integer", "description": "BFS depth cap (default 8, max 30)", "default": 8 },
-                    "max_paths": { "type": "integer", "description": "Max distinct paths to return (default 5, max 50)", "default": 5 }
-                },
-                "required": ["from", "to"]
-            }
-        }),
-        json!({
-            "name": "dependency_subgraph",
-            "description": "Dependency neighbourhood around a symbol via BFS over symbol_references. `direction=out` (default): what the symbol depends on; `in`: what depends on it; `both`: union. Returns nodes + edges within `max_depth`, bounded by `max_nodes`. Unlike call_path (path to a target), this is the whole reachable subgraph — good for impact analysis and understanding a symbol's blast radius. Caveats: dyn/trait dispatch not tracked; only resolved references are followed.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "symbol": { "type": "string", "description": "Center symbol name" },
-                    "file": { "type": "string", "description": "Disambiguate by file path (optional)" },
-                    "direction": {
-                        "type": "string",
-                        "enum": ["out", "in", "both"],
-                        "description": "out = dependencies; in = dependents; both = union",
-                        "default": "out"
-                    },
-                    "max_depth": { "type": "integer", "description": "BFS depth (default 3, max 20)", "default": 3 },
-                    "max_nodes": { "type": "integer", "description": "Node cap (default 50, max 500)", "default": 50 }
-                },
-                "required": ["symbol"]
-            }
-        }),
-        json!({
             "name": "find_implementations",
             "description": "Find implementations of a trait / interface / base class by name, across languages. Rust: `impl <Name> for <Type>` blocks (the trait position only — the implementing type doesn't false-match). TS/JS: `class X implements <Name>` and `class X extends <Name>`. Python: `class X(<Name>)` base classes. Whole-token matching (`Foo` won't match `FooBar`). Go is NOT supported — interface satisfaction is structural (method sets), not declared. Needs re-indexed signatures.",
             "inputSchema": {
@@ -277,22 +170,6 @@ pub fn core_tools_list() -> Vec<Value> {
                     "limit": { "type": "integer", "description": "Max results (default 100, max 500)", "default": 100 }
                 },
                 "required": ["name"]
-            }
-        }),
-        json!({
-            "name": "find_unused_imports",
-            "description": "Find imports in a file whose local binding is never used in the rest of the file. Parses imports via tree-sitter, then word-boundary matches each local binding against non-import lines. Skips wildcards (`use foo::*`, `from foo import *`) and `pub use` re-exports (use `include_reexports=true` to include them). Caveats: false positives on macros only referenced by name through `paste!` / `concat_idents!`; false negatives if a binding has the same name as a method called on an unrelated type.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "file": { "type": "string", "description": "File path relative to project root" },
-                    "include_reexports": {
-                        "type": "boolean",
-                        "description": "Include `pub use` (Rust) — by default re-exports are skipped because they may be consumed from outside the file.",
-                        "default": false
-                    }
-                },
-                "required": ["file"]
             }
         }),
         json!({
@@ -307,22 +184,6 @@ pub fn core_tools_list() -> Vec<Value> {
                     "kind": { "type": "string", "description": "Restrict to one kind (function/method). Default: both." },
                     "file": { "type": "string", "description": "Restrict to files whose path contains this substring" },
                     "limit": { "type": "integer", "description": "Max results (default 100, max 500)", "default": 100 }
-                }
-            }
-        }),
-        json!({
-            "name": "find_unused_symbols",
-            "description": "Find symbols with no incoming `call`/`usage`/`inherit`/`type_usage` references — dead-code candidates. Walks the symbol_references graph (both resolved by id and unresolved by name) and applies cleanup heuristics: tests/benches by path AND by attribute, entry points by name, FFI/wasm/Python exports by signature attributes. Caveats: the graph is language-agnostic. Attribute/decorator filtering works for Rust (#[test], #[wasm_bindgen]), Python (@pytest.fixture) and TS (@Component) — decorators are now captured into the signature. Go has no attribute markers (path+naming only). External consumers of public API aren't visible (use `public_only=false`); trait/dyn dispatch isn't tracked (false positives on trait impl methods); attribute filtering requires re-indexed data — old indexes need `force_reindex`.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "kind": { "type": "string", "description": "Restrict to one symbol kind. Default: all meaningful kinds (function, method, struct, enum, trait, interface, class, const, type, type_alias)." },
-                    "file": { "type": "string", "description": "Restrict to files whose path contains this substring (relative to project root)" },
-                    "public_only": { "type": "boolean", "description": "Only consider symbols whose signature starts with `pub`/`export` (or whose name doesn't start with `_`). Default: true.", "default": true },
-                    "exclude_tests": { "type": "boolean", "description": "Skip test files by path (tests/, test/, __tests__/, benches/, *.test.*, *.spec.*, *_test.*) AND by attribute in signature (#[test], #[tokio::test], #[bench], #[cfg(test)], @pytest.fixture, @pytest.mark) AND by naming convention (test_*, *_test). Default: true.", "default": true },
-                    "exclude_entry_points": { "type": "boolean", "description": "Skip symbols named `main`, `__main__`, `lambda_handler`, `handler` — typical CLI/Lambda entry points. Default: true.", "default": true },
-                    "exclude_exports": { "type": "boolean", "description": "Skip symbols whose signature contains FFI/wasm/Python/Node export markers: #[no_mangle], extern \"C\", #[wasm_bindgen], #[pyfunction], #[napi], @customElement, @Component, #[export_name]. Default: true.", "default": true },
-                    "limit": { "type": "integer", "description": "Max symbols to return (default 100, max 500)", "default": 100 }
                 }
             }
         }),
@@ -379,13 +240,11 @@ pub fn core_tools_list() -> Vec<Value> {
                 "required": ["symbol"]
             }
         }),
-        // Phase 0: Index Quality & Visibility
         json!({
             "name": "get_index_status",
             "description": "Get current index status with completeness metrics, file counts, and last sync information. Returns token-optimized status summaries.",
             "inputSchema": { "type": "object", "properties": {} }
         }),
-        // Phase 0: Lightweight Checks (Token Efficient)
         json!({
             "name": "read_function_context",
             "description": "Extract a single function with its dependencies (imports, types, called functions). Saves 90-95% tokens vs read_file by providing only relevant context.",
@@ -444,35 +303,6 @@ pub fn core_tools_list() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "smart_file_selection",
-            "description": "Get a ranked list of files relevant to a task or question. Helps AI choose which files to read by combining vector search, symbol matching, and path analysis.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Natural language description of task or question"
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "default": 5,
-                        "description": "Number of files to return (default: 5)"
-                    },
-                    "min_score": {
-                        "type": "number",
-                        "default": 0.3,
-                        "description": "Minimum relevance score 0-1 (default: 0.3)"
-                    },
-                    "boost_recency": {
-                        "type": "number",
-                        "default": 0.2,
-                        "description": "How much recency affects ranking (0.0 = ignore recency, 0.2 = small tiebreaker, 1.0 = legacy behaviour)"
-                    }
-                },
-                "required": ["query"]
-            }
-        }),
-        json!({
             "name": "batch_operations",
             "description": "Execute multiple read/search operations in a single request. Reduces latency by 3-5× through parallel execution and reduced network overhead.",
             "inputSchema": {
@@ -520,7 +350,6 @@ pub fn core_tools_list() -> Vec<Value> {
                 "required": ["operations"]
             }
         }),
-        // Phase 1: File Operations
         json!({
             "name": "list_directory",
             "description": "List directory contents with recursive support. Returns a token-optimized flat string array of paths and sizes. Supports exclude patterns for node_modules, target, etc.",
@@ -559,24 +388,6 @@ pub fn core_tools_list() -> Vec<Value> {
                 "required": ["path"]
             }
         }),
-        // Project stats & Vue
-        json!({
-            "name": "domain_stats",
-            "description": "Show symbol count breakdown by domain/directory. Returns a map of domain paths to their symbol counts.",
-            "inputSchema": { "type": "object", "properties": {} }
-        }),
-        json!({
-            "name": "get_vue_tree",
-            "description": "Get the Vue component tree for a .vue file. Returns the parent-child component relationships extracted from the index.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "file": { "type": "string", "description": "Path to the .vue file (relative to project root)" }
-                },
-                "required": ["file"]
-            }
-        }),
-        // Lightweight existence checks
         json!({
             "name": "file_exists",
             "description": "Check whether a file exists in the project. Cheaper than read_file for existence-only checks.",
@@ -601,35 +412,9 @@ pub fn core_tools_list() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "is_exported",
-            "description": "Check whether a symbol is exported/public. Uses signature heuristics (pub, export keywords) to determine visibility.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "symbol": { "type": "string", "description": "Symbol name to check" },
-                    "file": { "type": "string", "description": "File path to disambiguate when the symbol name is not unique (optional)" }
-                },
-                "required": ["symbol"]
-            }
-        }),
-        // Index quality
-        json!({
             "name": "validate_index",
             "description": "Validate index integrity: detect files missing symbols, orphaned data, failed indexing, broken references, and embedding gaps. Returns issues with severity and remediation recommendations.",
             "inputSchema": { "type": "object", "properties": {} }
-        }),
-        json!({
-            "name": "explain_symbol",
-            "description": "Explain a symbol in one call: definition, signature, callers (count+top), callees, and implementations (for types). Compact projection; full body only with include_bodies. Cheaper than separate get_symbols/get_callers/get_callees calls.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "symbol": { "type": "string", "description": "Symbol name to explain" },
-                    "file": { "type": "string", "description": "Optional file to disambiguate when the name is defined in multiple places" },
-                    "include_bodies": { "type": "boolean", "description": "Include the full definition body (default false)", "default": false }
-                },
-                "required": ["symbol"]
-            }
-        }),
+        })
     ]
 }

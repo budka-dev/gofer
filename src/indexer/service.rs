@@ -4,7 +4,6 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use super::domains::run_structural_fingerprinting;
 use super::embedder::EmbedderPool;
 use super::parser::{smart_chunk_file, CodeParser, SupportedLanguage};
 use super::pipeline;
@@ -155,7 +154,6 @@ impl IndexerService {
                 })
         });
         let all_refs = parser.parse_references(&content, language.clone())?;
-        let imports = parser.parse_imports(&content, language.clone());
 
         let modified = tokio::fs::metadata(path)
             .await?
@@ -185,48 +183,6 @@ impl IndexerService {
         self.sqlite
             .insert_symbols(file_id, &symbols_with_file_id)
             .await?;
-        self.sqlite.clear_dependency_usage(file_id).await?;
-
-        let ecosystem = match language.name() {
-            "rust" => "cargo",
-            "typescript"
-            | "javascript"
-            | "vue" => "npm",
-            "python" => "pip",
-            "go" => "go",
-            _ => "unknown",
-        };
-
-        for import in &imports {
-            if !import.is_relative {
-                let pkg_name = pipeline::extract_package_name(&import.path, language.clone());
-                let items_json = if !import.items.is_empty() {
-                    Some(serde_json::to_string(&import.items).unwrap_or_default())
-                } else {
-                    None
-                };
-                let usage_type = match language.name() {
-                    "rust" => "use",
-                    _ => "import",
-                };
-
-                if let Err(e) = self
-                    .sqlite
-                    .record_dependency_usage(
-                        file_id,
-                        &pkg_name,
-                        ecosystem,
-                        import.line as i32,
-                        usage_type,
-                        &import.path,
-                        items_json.as_deref(),
-                    )
-                    .await
-                {
-                    tracing::warn!("Failed to record dependency usage: {}", e);
-                }
-            }
-        }
 
         let stored_symbols = self.sqlite.get_file_symbols(file_id).await?;
 
@@ -319,27 +275,7 @@ impl IndexerService {
             return Ok(());
         }
 
-        // Phase 5: AST-based Structural Fingerprinting
-        if let Some(ref p) = progress {
-            *p.stage.lock().await = "fingerprinting".into();
-        }
-        tracing::info!("Phase 5: Structural fingerprinting...");
-
-        let fp_files: Vec<(String, String, &SupportedLanguage)> = metadata
-            .iter()
-            .map(|f| (f.path.clone(), (*f.content).clone(), &f.language))
-            .collect();
-
-        let fingerprint_links = run_structural_fingerprinting(&fp_files, &self.sqlite)
-            .await
-            .unwrap_or(0);
-
-        tracing::info!(
-            "Structural fingerprinting: {} links created",
-            fingerprint_links
-        );
-
-        // Phase 6: Build vector index for ANN search (incremental)
+        // Build vector index for ANN search (incremental)
         {
             if let Err(e) = self
                 .lance
@@ -350,11 +286,11 @@ impl IndexerService {
             }
         }
 
-        // Phase 7: Monorepo / sub-project detection
+        // Monorepo / sub-project detection
         if let Some(ref p) = progress {
             *p.stage.lock().await = "monorepo detection".into();
         }
-        tracing::info!("Phase 7: Sub-project detection...");
+        tracing::info!("Sub-project detection...");
         let subproject_count = detect_and_store_subprojects(root, &self.sqlite).await;
         tracing::info!(
             "Sub-project detection: {} sub-projects found",
