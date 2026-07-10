@@ -175,6 +175,76 @@ pub async fn tool_get_index_status(ctx: &ToolContext) -> Result<Value> {
             .push("Some files may lack embeddings. Run validate_index for details".to_string());
     }
 
+    // Reference graph quality
+    let (ref_total, ref_unresolved): (i64, i64) = {
+        let row = sqlx::query_as::<_, (i64, i64)>(
+            r#"
+            SELECT COUNT(*),
+                   COALESCE(SUM(CASE WHEN target_symbol_id IS NULL THEN 1 ELSE 0 END), 0)
+            FROM symbol_references
+            "#,
+        )
+        .fetch_one(ctx.sqlite.pool())
+        .await
+        .unwrap_or((0, 0));
+        row
+    };
+    let ref_resolved_pct = if ref_total > 0 {
+        ((ref_total - ref_unresolved) as f64 / ref_total as f64) * 100.0
+    } else {
+        100.0
+    };
+    if ref_total > 100 && ref_resolved_pct < 50.0 {
+        warnings.push(format!(
+            "[warning] Only {:.1}% of references resolved to symbol ids ({} / {})",
+            ref_resolved_pct,
+            ref_total - ref_unresolved,
+            ref_total
+        ));
+        recommendations.push(
+            "Call reindex force=true or reindex path= on hot files so resolve_references can bind edges"
+                .into(),
+        );
+    }
+
+    // Embedder probe (short timeout — status must stay snappy)
+    let embedder_status = match tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        ctx.embedder.health_check(),
+    )
+    .await
+    {
+        Ok(Ok(())) => json!({
+            "ok": true,
+            "model": ctx.embedder.model_name(),
+            "dimension": ctx.embedder.dimension(),
+        }),
+        Ok(Err(e)) => {
+            warnings.push(format!("[error] Embedder unhealthy: {}", e));
+            recommendations.push(
+                "Start the embed HTTP service (default http://127.0.0.1:8080/embed/). Symbol tools still work; search degrades to FTS.".into(),
+            );
+            json!({
+                "ok": false,
+                "error": e.to_string(),
+                "model": ctx.embedder.model_name(),
+                "dimension": ctx.embedder.dimension(),
+            })
+        }
+        Err(_) => {
+            warnings.push("[error] Embedder health check timed out (3s)".into());
+            recommendations.push(
+                "Embedder is slow or unreachable. Search will degrade until it responds.".into(),
+            );
+            json!({
+                "ok": false,
+                "error": "timeout",
+                "model": ctx.embedder.model_name(),
+                "dimension": ctx.embedder.dimension(),
+            })
+        }
+    };
+
     if warnings.is_empty() {
         recommendations.push("Index is healthy and up to date".to_string());
     }
@@ -183,6 +253,12 @@ pub async fn tool_get_index_status(ctx: &ToolContext) -> Result<Value> {
 
     Ok(json!({
         "health": health,
+        "embedder": embedder_status,
+        "references": {
+            "total": ref_total,
+            "unresolved": ref_unresolved,
+            "resolved_percent": format!("{:.1}", ref_resolved_pct),
+        },
         "status": if pending == 0 && failed == 0 { "complete" } else if pending > 0 { "indexing" } else { "partial" },
         "completeness": {
             "overall_percent": format!("{:.1}", completeness),
@@ -555,10 +631,22 @@ pub async fn tool_validate_index(ctx: &ToolContext) -> Result<Value> {
     }))
 }
 
-/// Reindex one file, or clear symbol tables for a forced rebuild.
+/// Reindex one file, or force a full clear + pipeline resync + ref resolution.
 pub async fn tool_reindex(args: Value, ctx: &ToolContext) -> Result<Value> {
+    use std::time::Instant;
+    use tokio_util::sync::CancellationToken;
+
     let force = args.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
     let path = args.get("path").and_then(|v| v.as_str());
+    let start = Instant::now();
+
+    let indexer = IndexerService::new(
+        (*ctx.sqlite).clone(),
+        Arc::clone(&ctx.lance),
+        Arc::clone(&ctx.embedder),
+        num_cpus::get().clamp(1, 4),
+    )
+    .with_cache(Arc::clone(&ctx.cache));
 
     if force {
         let pool = ctx.sqlite.pool();
@@ -568,40 +656,61 @@ pub async fn tool_reindex(args: Value, ctx: &ToolContext) -> Result<Value> {
         sqlx::query("DELETE FROM symbols").execute(pool).await?;
         sqlx::query("DELETE FROM files").execute(pool).await?;
         let _ = sqlx::query("DELETE FROM dependency_usage").execute(pool).await;
+
+        // Full disk → index rebuild (parse + embed + write).
+        indexer
+            .full_sync(
+                ctx.root_path.as_path(),
+                &[],
+                None,
+                None,
+                CancellationToken::new(),
+            )
+            .await
+            .map_err(|e| GoferError::ToolError(format!("full reindex failed: {}", e)))?;
+
+        let resolved = ctx.sqlite.resolve_references().await.unwrap_or(0);
+        let _ = ctx
+            .sqlite
+            .set_index_meta(
+                "last_full_sync",
+                &chrono::Utc::now().to_rfc3339(),
+            )
+            .await;
         ctx.cache.invalidate_all_searches().await;
+
+        let file_count = ctx.sqlite.get_file_count().await.unwrap_or(0);
         return Ok(json!({
             "ok": true,
-            "mode": "force_clear",
-            "message": "Cleared files/symbols/refs. Activate/sync the project (gofer start) to rebuild embeddings.",
+            "mode": "force_full",
+            "files_indexed": file_count,
+            "refs_resolved": resolved,
+            "duration_ms": start.elapsed().as_millis(),
+            "message": "Cleared symbol tables, ran full pipeline sync, resolved references.",
         }));
     }
 
     let Some(rel) = path else {
         return Err(GoferError::InvalidParams(
-            "Provide path= for single-file reindex, or force=true to clear index".into(),
+            "Provide path= for single-file reindex, or force=true for full rebuild".into(),
         )
         .into());
     };
 
     let abs = resolve_path(&ctx.root_path, rel);
-    let indexer = IndexerService::new(
-        (*ctx.sqlite).clone(),
-        Arc::clone(&ctx.lance),
-        Arc::clone(&ctx.embedder),
-        1,
-    )
-    .with_cache(Arc::clone(&ctx.cache));
-
     indexer
         .index_file(Path::new(&abs))
         .await
         .map_err(|e| GoferError::ToolError(format!("reindex failed: {}", e)))?;
 
+    let resolved = ctx.sqlite.resolve_references().await.unwrap_or(0);
     ctx.cache.invalidate_all_searches().await;
     Ok(json!({
         "ok": true,
         "mode": "file",
         "path": rel,
+        "refs_resolved": resolved,
+        "duration_ms": start.elapsed().as_millis(),
         "message": format!("Reindexed {}", rel),
     }))
 }

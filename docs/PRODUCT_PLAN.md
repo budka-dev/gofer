@@ -1,6 +1,6 @@
 # gofer product plan — index search MCP only
 
-**Status:** 16-tool surface + ref precision + envelope + comparisons + search polish.
+**Status:** quality pass — full reindex, embedder/ref health, compact-read structure, search/path boosts, resolve prefers pub.
 
 **Principle:** index + search + compact read. Host agent owns FS, grep, git, edits, answers.  
 **Anti-goal:** replace host-agent tools.

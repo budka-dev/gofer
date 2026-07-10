@@ -152,10 +152,28 @@ pub async fn tool_search(args: Value, ctx: &ToolContext) -> Result<Value> {
 
     let mut scores: HashMap<(String, u32), FusedHit> = HashMap::new();
 
+    // Query tokens for exact-name / path boosts (case-insensitive whole token).
+    let query_tokens: Vec<String> = query
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|t| t.len() >= 2)
+        .map(|t| t.to_lowercase())
+        .collect();
+
+    let path_boost = |file_path: &str| -> f64 {
+        let path_l = file_path.to_lowercase();
+        let mut b: f64 = 0.0;
+        for t in &query_tokens {
+            if t.len() >= 3 && path_l.contains(t.as_str()) {
+                b += 0.12;
+            }
+        }
+        b.min(0.36_f64)
+    };
+
     // Vector results contribute
     for (rank, hit) in vector_results.iter().enumerate() {
         let key = (hit.file_path.clone(), hit.line_start);
-        let rrf = 1.0 / (K + rank as f64 + 1.0);
+        let rrf = 1.0 / (K + rank as f64 + 1.0) + path_boost(&hit.file_path);
         scores
             .entry(key)
             .and_modify(|h| {
@@ -175,17 +193,10 @@ pub async fn tool_search(args: Value, ctx: &ToolContext) -> Result<Value> {
             });
     }
 
-    // Query tokens for exact-name boost (case-insensitive whole token).
-    let query_tokens: Vec<String> = query
-        .split(|c: char| !c.is_alphanumeric() && c != '_')
-        .filter(|t| t.len() >= 2)
-        .map(|t| t.to_lowercase())
-        .collect();
-
     // FTS results contribute
     for (rank, sym) in fts_results.iter().enumerate() {
         let key = (sym.file_path.clone(), sym.line as u32);
-        let mut rrf = 1.0 / (K + rank as f64 + 1.0);
+        let mut rrf = 1.0 / (K + rank as f64 + 1.0) + path_boost(&sym.file_path);
         // Exact symbol-name match beats partial FTS noise.
         let name_l = sym.name.to_lowercase();
         if query_tokens.iter().any(|t| t == &name_l) {

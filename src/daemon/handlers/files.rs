@@ -68,17 +68,40 @@ pub async fn tool_skeleton(args: Value, ctx: &ToolContext) -> Result<Value> {
     // Count items in skeleton
     let items = count_skeleton_items(&skeleton, language);
 
+    // Structured symbol list from index (same file) for agents that skip prose.
+    let abs = file_path.to_string_lossy().to_string();
+    let index_symbols = ctx
+        .sqlite
+        .get_symbols(Some(&abs), None, 0, 500)
+        .await
+        .unwrap_or_default();
+    let symbols_json: Vec<Value> = index_symbols
+        .iter()
+        .map(|s| {
+            json!({
+                "name": s.name,
+                "kind": s.kind,
+                "line": s.line,
+                "end_line": s.end_line,
+                "signature": s.signature,
+            })
+        })
+        .collect();
+
     Ok(json!({
+        "file": file,
         "file_path": file,
         "language": language,
         "skeleton_content": skeleton,
+        "symbols": symbols_json,
         "stats": {
             "original_lines": original_lines,
             "original_chars": original_chars,
             "skeleton_lines": skeleton_lines,
             "skeleton_chars": skeleton_chars,
             "reduction_percent": format!("{:.1}", reduction_percent),
-            "items_kept": items
+            "items_kept": items,
+            "index_symbols": symbols_json.len(),
         }
     }))
 }
@@ -261,12 +284,20 @@ pub async fn tool_read_function_context(args: Value, ctx: &ToolContext) -> Resul
     Ok(json!({
         "file": file,
         "function": function,
+        "language": lang,
         "code": function_code,
         "start_line": start_line,
         "end_line": end_line,
+        "line_count": end_line.saturating_sub(start_line).saturating_add(1),
         "referenced_types": types,
         "imports": imports,
-        "callees": callees
+        "callees": callees,
+        "stats": {
+            "code_chars": function_code.len(),
+            "types": types.len(),
+            "imports": imports.len(),
+            "callees": callees.len(),
+        }
     }))
 }
 
@@ -296,15 +327,58 @@ pub async fn tool_read_types_only(args: Value, ctx: &ToolContext) -> Result<Valu
     // files (slave-core-contracts/src/task.ts).
     if matches!(ext, "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs") {
         let blocks = extract_ts_type_blocks(&content, kind_filter, include_docs);
+        let types: Vec<Value> = blocks
+            .iter()
+            .map(|b| {
+                let first = b.lines().find(|l| !l.trim().starts_with("///") && !l.trim().starts_with("/*") && !l.trim().is_empty()).unwrap_or("");
+                json!({ "text": b, "preview": first.trim() })
+            })
+            .collect();
         return Ok(json!({
             "file": file,
             "kind": kind_filter,
-            "total": blocks.len(),
+            "total": types.len(),
+            "types": types,
             "types_content": blocks.join("\n\n"),
         }));
     }
 
-    // Fallback for languages we don't AST-parse here (rust uses skeleton output)
+    // Prefer index symbols for type-like kinds when available (precise lines).
+    let abs = file_path.to_string_lossy().to_string();
+    let mut index_types = ctx
+        .sqlite
+        .get_symbols(Some(&abs), None, 0, 500)
+        .await
+        .unwrap_or_default();
+    index_types.retain(|s| {
+        matches!(
+            s.kind.as_str(),
+            "struct" | "enum" | "interface" | "type" | "type_alias" | "class" | "trait"
+        ) && kind_filter.map(|k| s.kind.as_str().contains(k) || s.name.contains(k)).unwrap_or(true)
+    });
+    if !index_types.is_empty() {
+        let types: Vec<Value> = index_types
+            .iter()
+            .map(|s| {
+                json!({
+                    "name": s.name,
+                    "kind": s.kind,
+                    "line": s.line,
+                    "end_line": s.end_line,
+                    "signature": s.signature,
+                })
+            })
+            .collect();
+        return Ok(json!({
+            "file": file,
+            "kind": kind_filter,
+            "total": types.len(),
+            "types": types,
+            "source": "index",
+        }));
+    }
+
+    // Fallback: skeleton line filter
     let skeleton = crate::indexer::context::skeletonize_content(&content, ext);
     let filtered_lines: Vec<&str> = skeleton
         .lines()
@@ -332,7 +406,9 @@ pub async fn tool_read_types_only(args: Value, ctx: &ToolContext) -> Result<Valu
     Ok(json!({
         "file": file,
         "kind": kind_filter,
-        "types_content": filtered_lines.join("\n")
+        "total": filtered_lines.len(),
+        "types_content": filtered_lines.join("\n"),
+        "source": "skeleton",
     }))
 }
 

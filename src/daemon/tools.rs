@@ -349,12 +349,12 @@ pub fn core_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "reindex",
-            "description": "Reindex the project or a single file. force=true clears symbol/file tables then signals full rebuild; path reindexes one file via the indexer. Use when validate_index reports gaps. This owns the index — host FS tools cannot replace it.",
+            "description": "Rebuild index. path= one file + resolve_references. force=true clears tables, runs full_sync (parse+embed+write), resolves refs — single MCP call.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "force": { "type": "boolean", "description": "Clear SQLite files/symbols/refs before rebuild (default false)", "default": false },
-                    "path": { "type": "string", "description": "Optional file path relative to project root for single-file reindex" }
+                    "force": { "type": "boolean", "description": "Full clear + full_sync + resolve (default false)", "default": false },
+                    "path": { "type": "string", "description": "Single file path relative to project root" }
                 }
             }
         })

@@ -559,19 +559,33 @@ impl SqliteStorage {
         .await?;
         total += r2.rows_affected();
 
-        // Pass 3: Global fallback — any symbol with matching name
+        // Pass 3: Global fallback — prefer exported/public definitions over private
+        // when multiple symbols share a name (reduces `new`/`parse` mis-binds).
         let r3 = sqlx::query(
             r#"
             UPDATE symbol_references
             SET target_symbol_id = matched.target_id
             FROM (
-                SELECT sr.id AS ref_id, MIN(s.id) AS target_id
+                SELECT sr.id AS ref_id,
+                       (
+                         SELECT s.id FROM symbols s
+                         WHERE s.name = sr.target_name
+                         ORDER BY
+                           CASE
+                             WHEN s.signature LIKE 'pub %' THEN 0
+                             WHEN s.signature LIKE 'export %' THEN 0
+                             WHEN s.signature LIKE '%export %' THEN 1
+                             WHEN s.name NOT LIKE '\_%' ESCAPE '\' THEN 2
+                             ELSE 3
+                           END,
+                           s.id ASC
+                         LIMIT 1
+                       ) AS target_id
                 FROM symbol_references sr
-                JOIN symbols s ON s.name = sr.target_name
                 WHERE sr.target_symbol_id IS NULL
-                GROUP BY sr.id
             ) AS matched
             WHERE symbol_references.id = matched.ref_id
+              AND matched.target_id IS NOT NULL
             "#,
         )
         .execute(&self.pool)

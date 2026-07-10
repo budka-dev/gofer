@@ -75,9 +75,9 @@ gofer — **read-only index-search MCP**, не замена native tools аге�
 | Tool | Args | Что делает |
 |---|---|---|
 | `batch_operations` | **operations** (`search` \| `get_symbols` \| `skeleton` \| `get_references` \| `read_function_context` \| `read_types_only`), `parallel`, … | Несколько index-ops за один RPC. |
-| `get_index_status` | — | Completeness, counts, sync age. |
+| `get_index_status` | — | Completeness, embedder health probe, ref resolve %, sync age. |
 | `validate_index` | — | Integrity issues + recommendations. |
-| `reindex` | `force`, `path` | `path` — один файл; `force=true` — clear tables (потом `gofer start` для full rebuild). |
+| `reindex` | `force`, `path` | `path` — один файл + resolve; `force=true` — clear + **full_sync** + resolve (один call). |
 
 ## Resources
 

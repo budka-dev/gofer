@@ -230,6 +230,16 @@ impl EmbedderPool {
         Ok(embeddings.into_iter().next().unwrap_or_default())
     }
 
+    /// Probe the external embed HTTP endpoint with a tiny payload.
+    pub async fn health_check(&self) -> Result<()> {
+        let _ = self.embed_query("gofer-health").await?;
+        Ok(())
+    }
+
+    pub fn model_name(&self) -> &str {
+        &self.model_name
+    }
+
     pub fn dimension(&self) -> usize {
         self.model_dimension
     }
