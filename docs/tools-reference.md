@@ -65,3 +65,15 @@ MCP **prompts** сняты — агент сам собирает ответ и�
 
 - [PRODUCT_PLAN.md](PRODUCT_PLAN.md) — план продукта  
 - [examples.md](examples.md) — сценарии (частично устаревают — правь под 16 tools)  
+
+## Embedder / offline behaviour
+
+gofer does **not** embed locally. It POSTs batches to an HTTP embed endpoint (default `http://127.0.0.1:8080/embed/`).
+
+| Mode | Behaviour |
+|---|---|
+| Embedder up | Full hybrid `search` (vector + FTS) |
+| Embedder down | `search` degrades to keyword/FTS where possible and may set `degraded`/warnings; symbol tools and compact read keep working |
+| No index / empty project | Run `gofer init` + `gofer start`, or MCP `reindex` + project activate |
+
+Config: project `.gofer` / embed URL in project settings (see [config-reference.md](config-reference.md) if present).

@@ -81,22 +81,24 @@ pub fn core_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "get_references",
-            "description": "Find all references to a symbol (where it's used in the codebase). Returns a token-optimized flat string array.",
+            "description": "Find references to a symbol. Prefers resolved target_symbol_id edges (fewer false positives on common names). Optional file disambiguates which definition when the name is shared.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "symbol": { "type": "string", "description": "Symbol name to find references for" }
+                    "symbol": { "type": "string", "description": "Symbol name to find references for" },
+                    "file": { "type": "string", "description": "Defining file path to disambiguate (optional)" }
                 },
                 "required": ["symbol"]
             }
         }),
         json!({
             "name": "get_callers",
-            "description": "Find all symbols that call/reference a given symbol (incoming references). Returns a token-optimized flat string array.",
+            "description": "Find callers of a symbol (incoming call/usage). Prefers resolved symbol ids; optional file disambiguates the definition.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "symbol": { "type": "string", "description": "Symbol name to find callers for" }
+                    "symbol": { "type": "string", "description": "Symbol name to find callers for" },
+                    "file": { "type": "string", "description": "Defining file path to disambiguate (optional)" }
                 },
                 "required": ["symbol"]
             }

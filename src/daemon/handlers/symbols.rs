@@ -122,16 +122,23 @@ pub async fn tool_get_symbols(args: Value, ctx: &ToolContext) -> Result<Value> {
 
 pub async fn tool_get_references(args: Value, ctx: &ToolContext) -> Result<Value> {
     let symbol = args.get("symbol").and_then(|v| v.as_str()).unwrap_or("");
+    let file = args.get("file").and_then(|v| v.as_str());
 
     if symbol.is_empty() {
         return Err(GoferError::InvalidParams("Symbol name is required".into()).into());
     }
 
-    let refs = &ctx.sqlite.get_references_by_name(symbol).await?;
+    let defining_file = file.map(|f| resolve_path(&ctx.root_path, f));
+    let refs = ctx
+        .sqlite
+        .get_references_for_symbol(symbol, defining_file.as_deref(), true)
+        .await?;
 
     Ok(json!({
         "symbol": symbol,
+        "file": file,
         "total": refs.len(),
+        "precision": "prefer_resolved",
         "references": refs.iter().map(|r| {
             format!("{}:{} ({})", make_relative(&ctx.root_path, &r.file_path), r.line, r.ref_kind)
         }).collect::<Vec<_>>()
@@ -185,12 +192,17 @@ pub async fn tool_search_symbols(args: Value, ctx: &ToolContext) -> Result<Value
 
 pub async fn tool_get_callers(args: Value, ctx: &ToolContext) -> Result<Value> {
     let symbol = args.get("symbol").and_then(|v| v.as_str()).unwrap_or("");
+    let file = args.get("file").and_then(|v| v.as_str());
 
     if symbol.is_empty() {
         return Err(GoferError::InvalidParams("Symbol name is required".into()).into());
     }
 
-    let refs = &ctx.sqlite.get_references_by_name(symbol).await?;
+    let defining_file = file.map(|f| resolve_path(&ctx.root_path, f));
+    let refs = ctx
+        .sqlite
+        .get_references_for_symbol(symbol, defining_file.as_deref(), true)
+        .await?;
 
     // Filter for calls/usages
     let callers: Vec<_> = refs
@@ -200,7 +212,9 @@ pub async fn tool_get_callers(args: Value, ctx: &ToolContext) -> Result<Value> {
 
     Ok(json!({
         "symbol": symbol,
+        "file": file,
         "total": callers.len(),
+        "precision": "prefer_resolved",
         "callers": callers.iter().map(|r| {
             format!("{}:{} ({})", make_relative(&ctx.root_path, &r.file_path), r.line, r.ref_kind)
         }).collect::<Vec<_>>()

@@ -622,11 +622,75 @@ impl SqliteStorage {
         Ok(q.fetch_all(&self.pool).await?)
     }
 
-    /// Get references by symbol name
+    /// Get references by symbol name (all unresolved+resolved name matches).
     pub async fn get_references_by_name(
         &self,
         symbol_name: &str,
     ) -> Result<Vec<ReferenceWithPath>> {
+        self.get_references_for_symbol(symbol_name, None, false).await
+    }
+
+    /// Incoming references for a symbol, with optional precision controls.
+    ///
+    /// - `file`: disambiguate which definition (absolute path of defining file).
+    /// - `prefer_resolved`: when the symbol has a resolved `target_symbol_id`
+    ///   for at least one ref, return only refs pointing at that id (or any
+    ///   matching id if multiple defs). Unresolved name-only refs are dropped
+    ///   in that case to cut false positives on common names like `new`.
+    ///   If nothing resolved exists, fall back to name match.
+    pub async fn get_references_for_symbol(
+        &self,
+        symbol_name: &str,
+        defining_file: Option<&str>,
+        prefer_resolved: bool,
+    ) -> Result<Vec<ReferenceWithPath>> {
+        // Collect candidate definition ids when file disambiguation or prefer_resolved.
+        let mut def_ids: Vec<i64> = Vec::new();
+        if defining_file.is_some() || prefer_resolved {
+            let mut q = String::from(
+                "SELECT s.id FROM symbols s JOIN files f ON f.id = s.file_id WHERE s.name = ?",
+            );
+            if defining_file.is_some() {
+                q.push_str(" AND f.path = ?");
+            }
+            let mut query = sqlx::query_scalar::<_, i64>(&q).bind(symbol_name);
+            if let Some(f) = defining_file {
+                query = query.bind(f);
+            }
+            def_ids = query.fetch_all(&self.pool).await?;
+        }
+
+        if prefer_resolved && !def_ids.is_empty() {
+            // Prefer id-based matches.
+            let placeholders = def_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let sql = format!(
+                r#"
+                SELECT sr.id, sr.target_name, sr.kind as ref_kind, sr.line, f.path as file_path
+                FROM symbol_references sr
+                JOIN symbols s ON sr.source_symbol_id = s.id
+                JOIN files f ON s.file_id = f.id
+                WHERE sr.target_symbol_id IN ({ph})
+                ORDER BY f.path, sr.line
+                "#,
+                ph = placeholders
+            );
+            let mut q = sqlx::query_as::<_, ReferenceWithPath>(&sql);
+            for id in &def_ids {
+                q = q.bind(id);
+            }
+            let resolved = q.fetch_all(&self.pool).await?;
+            if !resolved.is_empty() {
+                return Ok(resolved);
+            }
+            // Fall through to name match if nothing resolved yet (fresh index
+            // before resolve_references pass).
+        }
+
+        if defining_file.is_some() && def_ids.is_empty() {
+            // File disambiguation requested but no definition there.
+            return Ok(Vec::new());
+        }
+
         let refs = sqlx::query_as::<_, ReferenceWithPath>(
             r#"
             SELECT sr.id, sr.target_name, sr.kind as ref_kind, sr.line, f.path as file_path

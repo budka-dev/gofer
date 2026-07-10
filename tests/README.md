@@ -68,3 +68,5 @@
 Если делаешь PR с оптимизацией существующего инструмента или добавляешь новый — приложи свежий замер в формате `tests/NN_<tool>_comparison.md` по [методологии](00_methodology.md). Это лучшая форма ревью-аргумента.
 
 Если просто хочешь понять, **где gofer быстрее/дешевле**, чем native — это полезный материал перед интеграцией.
+
+> **2026-07:** MCP surface is ~16 index-search tools only. Comparison docs that mention `grep`, `read_file`, `write_file`, `patch_file`, git, or analysis tools are historical; host agent owns those. Prefer scenarios for `search`, `skeleton`, `get_references` / callers, `context_bundle`.
