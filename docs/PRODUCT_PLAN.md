@@ -1,6 +1,6 @@
 # gofer product plan — index search MCP only
 
-**Status:** 16-tool surface shipped; ref precision + embedder notes in progress.
+**Status:** 16-tool surface + ref precision + envelope + comparison archive.
 
 **Principle:** index + search + compact read. Host agent owns FS, grep, git, edits, answers.  
 **Anti-goal:** replace host-agent tools.
@@ -40,12 +40,12 @@
 3. validate_index points to `reindex` tool / CLI
 4. Stop writing domain-only noise if unused (optional keep domain column write)
 
-## Later
+## Later / progress
 
-- [x] Reference resolution precision (`prefer_resolved` + optional `file` on get_references/get_callers)
-- [ ] Unified response envelope (still mixed flat strings vs JSON objects)
+- [x] Reference resolution precision (`prefer_resolved` + optional `file`)
+- [x] Unified response envelope (`ok`/`tool`/`result`/`meta` + structured lists)
 - [x] Embedder DX / offline notes in tools-reference
-- [ ] Comparison tests refresh (`tests/*_comparison.md` still mention removed tools)
+- [x] Comparison tests refresh (archive host-duplicate/mutation reports; README for 16-tool surface)
 
 ## Execution order
 

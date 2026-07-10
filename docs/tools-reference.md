@@ -17,6 +17,32 @@ gofer — **read-only index-search MCP**, не замена native tools аге�
 
 Сейчас **16 tools**.
 
+## Response envelope
+
+Каждый `tools/call` возвращает MCP `content[].text` — JSON:
+
+```json
+{
+  "ok": true,
+  "tool": "search",
+  "result": { },
+  "meta": { "latency_ms": 12 }
+}
+```
+
+Ошибка:
+
+```json
+{
+  "ok": false,
+  "tool": "reindex",
+  "error": { "message": "..." },
+  "meta": { "latency_ms": 3 }
+}
+```
+
+Внутри `result` — данные инструмента. Списки символов/ссылок/search hits — **объекты** (`file`, `line`, …), не склеенные строки.
+
 ## Поиск
 
 | Tool | Args | Что делает |

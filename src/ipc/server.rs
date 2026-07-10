@@ -661,15 +661,18 @@ async fn handle_tools_call(
 
     match result {
         Ok(value) => {
-            let text = serde_json::to_string_pretty(&value).unwrap_or_default();
+            let body = tools::envelope_ok(name, value, latency_ms);
+            let text = serde_json::to_string_pretty(&body).unwrap_or_default();
             DaemonResponse::success(id, json!({ "content": [{"type": "text", "text": text}] }))
         }
         Err(e) => {
             tracing::error!("Tool Error [{}]: {}", name, e);
+            let body = tools::envelope_err(name, e.to_string(), latency_ms);
+            let text = serde_json::to_string_pretty(&body).unwrap_or_default();
             DaemonResponse::success(
                 id,
                 json!({
-                    "content": [{"type": "text", "text": format!("Error: {}", e)}],
+                    "content": [{"type": "text", "text": text}],
                     "isError": true
                 }),
             )

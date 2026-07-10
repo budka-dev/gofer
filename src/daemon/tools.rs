@@ -9,6 +9,57 @@ use crate::error::GoferError;
 
 pub use super::handlers::common::ToolContext;
 
+/// Uniform MCP tool payload wrapped as JSON text in `tools/call` content.
+///
+/// Success:
+/// ```json
+/// { "ok": true, "tool": "search", "result": { ... }, "meta": { "latency_ms": 12 } }
+/// ```
+/// Error:
+/// ```json
+/// { "ok": false, "tool": "search", "error": { "message": "..." }, "meta": { "latency_ms": 3 } }
+/// ```
+pub fn envelope_ok(tool: &str, result: Value, latency_ms: u64) -> Value {
+    json!({
+        "ok": true,
+        "tool": tool,
+        "result": result,
+        "meta": { "latency_ms": latency_ms }
+    })
+}
+
+/// See [`envelope_ok`].
+pub fn envelope_err(tool: &str, message: impl AsRef<str>, latency_ms: u64) -> Value {
+    json!({
+        "ok": false,
+        "tool": tool,
+        "error": { "message": message.as_ref() },
+        "meta": { "latency_ms": latency_ms }
+    })
+}
+
+#[cfg(test)]
+mod envelope_tests {
+    use super::*;
+
+    #[test]
+    fn envelope_ok_shape() {
+        let v = envelope_ok("search", json!({"total": 1}), 5);
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["tool"], "search");
+        assert_eq!(v["result"]["total"], 1);
+        assert_eq!(v["meta"]["latency_ms"], 5);
+    }
+
+    #[test]
+    fn envelope_err_shape() {
+        let v = envelope_err("reindex", "path required", 2);
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["error"]["message"], "path required");
+        assert_eq!(v["meta"]["latency_ms"], 2);
+    }
+}
+
 /// Dispatch a tool call by name. Returns structured JSON.
 pub async fn dispatch(name: &str, args: Value, ctx: &ToolContext) -> Result<Value> {
     match name {

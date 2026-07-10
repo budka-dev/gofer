@@ -256,34 +256,31 @@ pub async fn tool_search(args: Value, ctx: &ToolContext) -> Result<Value> {
 
             let default_content = hit.content.trim().to_string();
             let content_str = if preview_mode {
-                preview.as_ref().unwrap_or(&default_content)
+                preview.as_ref().unwrap_or(&default_content).clone()
             } else {
-                &default_content
+                default_content
             };
 
-            let mut parts = vec![format!(
-                "{}:{}",
-                make_relative(&ctx.root_path, &hit.file_path),
-                hit.line_start
-            )];
-
+            let mut result = json!({
+                "file": make_relative(&ctx.root_path, &hit.file_path),
+                "line": hit.line_start,
+                "content": content_str,
+            });
             if include_scores {
-                if let Some(vs) = hit.vector_score {
-                    parts.push(format!("[score={:.3} rank={:.3}]", vs, rank_score));
+                result["score"] = json!(headline_score);
+                result["rank_score"] = json!(rank_score);
+                if hit.vector_score.is_none() {
+                    result["score_source"] = json!("fts");
                 } else {
-                    parts.push(format!("[rank={:.3} fts-only]", rank_score));
+                    result["score_source"] = json!("vector");
                 }
             }
-            if include_scores || preview_mode {
-                if let Some(reason) = &match_reason {
-                    parts.push(format!("(reason:{})", reason));
-                }
+            if let Some(reason) = match_reason {
+                result["reason"] = json!(reason);
             }
             if let Some(ctx_val) = context {
-                parts.push(format!("(ctx:{})", ctx_val));
+                result["context"] = json!(ctx_val);
             }
-
-            let result = json!(format!("{}\n{}", parts.join(" "), content_str));
 
             (headline_score, result)
         })
