@@ -88,25 +88,26 @@ pub fn core_tools_list() -> Vec<Value> {
     vec![
         json!({
             "name": "search",
-            "description": "Semantic search across the codebase with optional relevance scores and preview mode. Returns relevant code snippets with file paths and line numbers.",
+            "description": "Hybrid semantic+keyword search over the index. Returns structured hits {file,line,content}. Exact symbol-name tokens are boosted; results diversify by file (max_per_file). Content is capped for tokens.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "query": { "type": "string", "description": "Natural language search query" },
                     "limit": { "type": "integer", "description": "Maximum results (default: 10)", "default": 10 },
                     "path": { "type": "string", "description": "Subdirectory to search within (e.g., 'src/api')" },
-                    "glob": { "type": "string", "description": "File pattern filter (e.g., '*.rs', '*.{ts,tsx}')" },
-                    "include_scores": { "type": "boolean", "description": "Include relevance scores (0.0-1.0)", "default": false },
-                    "preview_mode": { "type": "boolean", "description": "Return short preview (2-3 lines) instead of full content. Saves 80% tokens.", "default": false },
-                    "min_score": { "type": "number", "description": "Minimum relevance score to include (0.0-1.0, filters low-quality results)", "default": 0.0 },
-                    "include_context": { "type": "boolean", "description": "Include context (function/class name where match found)", "default": true }
+                    "glob": { "type": "string", "description": "File pattern on path or basename (e.g., '*.rs', 'src/**/*.ts')" },
+                    "include_scores": { "type": "boolean", "description": "Include score/rank_score/score_source fields", "default": false },
+                    "preview_mode": { "type": "boolean", "description": "Short preview (2-3 lines) instead of full chunk", "default": false },
+                    "min_score": { "type": "number", "description": "Minimum score (vector cosine when available)", "default": 0.0 },
+                    "include_context": { "type": "boolean", "description": "Include matched symbol/context field", "default": true },
+                    "max_per_file": { "type": "integer", "description": "Max hits kept per file after ranking (default 3)", "default": 3 }
                 },
                 "required": ["query"]
             }
         }),
         json!({
             "name": "search_symbols",
-            "description": "Search symbols (functions, structs, classes) by name pattern. Supports substring matching. Returns a token-optimized map clustered by file.",
+            "description": "Search symbols by name pattern. Returns structured list [{file,line,kind,name,signature}].",
             "inputSchema": {
                 "type": "object",
                 "properties": {

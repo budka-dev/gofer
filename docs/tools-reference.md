@@ -47,7 +47,7 @@ gofer — **read-only index-search MCP**, не замена native tools аге�
 
 | Tool | Args | Что делает |
 |---|---|---|
-| `search` | **query**, `limit`, `path`, `glob`, `include_scores`, `preview_mode`, `min_score`, `include_context` | Hybrid semantic (vector + FTS). `preview_mode` экономит токены. |
+| `search` | **query**, `limit`, `path`, `glob`, `include_scores`, `preview_mode`, `min_score`, `include_context`, `max_per_file` (3) | Hybrid vector+FTS. Exact symbol tokens boosted; diversify by file; content capped ~600 chars. |
 | `search_symbols` | **query**, `kind`, `limit` | Символы по имени/подстроке. |
 
 ## Символы и граф

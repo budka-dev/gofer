@@ -1,6 +1,6 @@
 # gofer product plan — index search MCP only
 
-**Status:** 16-tool surface + ref precision + envelope + comparison archive.
+**Status:** 16-tool surface + ref precision + envelope + comparisons + search polish.
 
 **Principle:** index + search + compact read. Host agent owns FS, grep, git, edits, answers.  
 **Anti-goal:** replace host-agent tools.

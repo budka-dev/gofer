@@ -17,6 +17,11 @@ pub struct FusedHit {
     pub symbol_kind: Option<SymbolKind>,
 }
 
+/// Max chars of hit content in search results (token hygiene).
+const SEARCH_CONTENT_MAX_CHARS: usize = 600;
+/// Soft cap: keep at most this many hits per file after ranking.
+const SEARCH_MAX_PER_FILE: usize = 3;
+
 pub async fn tool_search(args: Value, ctx: &ToolContext) -> Result<Value> {
     use std::time::Instant;
     let search_start = Instant::now();
@@ -44,14 +49,31 @@ pub async fn tool_search(args: Value, ctx: &ToolContext) -> Result<Value> {
 
     // Extract path filter for use in vector and FTS search
     let path_filter = args.get("path").and_then(|v| v.as_str());
+    let glob_filter = args.get("glob").and_then(|v| v.as_str());
+    let max_per_file = args
+        .get("max_per_file")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(SEARCH_MAX_PER_FILE as u64)
+        .clamp(1, 20) as usize;
 
     if query.is_empty() {
         return Err(GoferError::InvalidParams("Query is required".into()).into());
     }
 
-    // NEW: Feature 008 - Check cache first
-    if let Some(cached_json) = ctx.cache.get_search(query, limit).await {
-        // Parse cached JSON back to Value
+    // Cache key includes filters so path/glob/preview variants don't collide.
+    let cache_fingerprint = format!(
+        "v2|{}|l={}|p={}|g={}|prev={}|min={:.3}|sc={}|ctx={}|mpf={}",
+        query,
+        limit,
+        path_filter.unwrap_or(""),
+        glob_filter.unwrap_or(""),
+        preview_mode,
+        min_score,
+        include_scores,
+        include_context,
+        max_per_file
+    );
+    if let Some(cached_json) = ctx.cache.get_search(&cache_fingerprint, 0).await {
         if let Ok(cached_result) = serde_json::from_str::<Value>(&cached_json) {
             return Ok(cached_result);
         }
@@ -153,10 +175,22 @@ pub async fn tool_search(args: Value, ctx: &ToolContext) -> Result<Value> {
             });
     }
 
+    // Query tokens for exact-name boost (case-insensitive whole token).
+    let query_tokens: Vec<String> = query
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|t| t.len() >= 2)
+        .map(|t| t.to_lowercase())
+        .collect();
+
     // FTS results contribute
     for (rank, sym) in fts_results.iter().enumerate() {
         let key = (sym.file_path.clone(), sym.line as u32);
-        let rrf = 1.0 / (K + rank as f64 + 1.0);
+        let mut rrf = 1.0 / (K + rank as f64 + 1.0);
+        // Exact symbol-name match beats partial FTS noise.
+        let name_l = sym.name.to_lowercase();
+        if query_tokens.iter().any(|t| t == &name_l) {
+            rrf += 0.5; // strong boost into RRF fusion
+        }
         let content = sym.signature.as_deref().unwrap_or(&sym.name).to_string();
         scores
             .entry(key)
@@ -185,30 +219,26 @@ pub async fn tool_search(args: Value, ctx: &ToolContext) -> Result<Value> {
             .partial_cmp(&a.rrf_score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    fused.truncate(limit * 2); // Keep extra for filtering
+    fused.truncate(limit * 3); // Keep extra for filtering / per-file cap
 
-    // 5. Filter by path/glob if specified - NOW ONLY FOR GLOB
-    let glob_filter = args.get("glob").and_then(|v| v.as_str());
-
-    let fused = if glob_filter.is_some() {
-        let glob_pat = glob_filter.and_then(|g| glob::Pattern::new(g).ok());
-
+    // Glob filter: match full path and basename (not basename-only).
+    let fused = if let Some(g) = glob_filter {
+        let glob_pat = glob::Pattern::new(g).ok();
         let mut filtered: Vec<FusedHit> = fused
             .into_iter()
             .filter(|hit| {
-                if let Some(ref gp) = glob_pat {
-                    let name = Path::new(&hit.file_path)
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("");
-                    if !gp.matches(name) {
-                        return false;
-                    }
-                }
-                true
+                let Some(ref gp) = glob_pat else {
+                    return true;
+                };
+                let rel = make_relative(&ctx.root_path, &hit.file_path);
+                let name = Path::new(&hit.file_path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("");
+                gp.matches(&rel) || gp.matches(&hit.file_path) || gp.matches(name)
             })
             .collect();
-        filtered.truncate(limit * 2);
+        filtered.truncate(limit * 3);
         filtered
     } else {
         fused
@@ -255,17 +285,31 @@ pub async fn tool_search(args: Value, ctx: &ToolContext) -> Result<Value> {
             };
 
             let default_content = hit.content.trim().to_string();
-            let content_str = if preview_mode {
+            let mut content_str = if preview_mode {
                 preview.as_ref().unwrap_or(&default_content).clone()
             } else {
                 default_content
             };
+            let mut content_truncated = false;
+            if content_str.len() > SEARCH_CONTENT_MAX_CHARS {
+                // Prefer char boundary for UTF-8 safety.
+                let mut end = SEARCH_CONTENT_MAX_CHARS;
+                while end > 0 && !content_str.is_char_boundary(end) {
+                    end -= 1;
+                }
+                content_str.truncate(end);
+                content_str.push('…');
+                content_truncated = true;
+            }
 
             let mut result = json!({
                 "file": make_relative(&ctx.root_path, &hit.file_path),
                 "line": hit.line_start,
                 "content": content_str,
             });
+            if content_truncated {
+                result["content_truncated"] = json!(true);
+            }
             if include_scores {
                 result["score"] = json!(headline_score);
                 result["rank_score"] = json!(rank_score);
@@ -287,12 +331,29 @@ pub async fn tool_search(args: Value, ctx: &ToolContext) -> Result<Value> {
         .filter(|(score, _)| *score >= min_score)
         .collect::<Vec<_>>();
 
-    // Sort by score descending
+    // Sort by score descending, then diversify: max N hits per file.
     let mut enhanced_results = enhanced_results;
     enhanced_results.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-    enhanced_results.truncate(limit);
+    let mut per_file: HashMap<String, usize> = HashMap::new();
+    let mut diversified: Vec<Value> = Vec::with_capacity(limit);
+    for (_, r) in enhanced_results {
+        let file = r
+            .get("file")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let n = per_file.entry(file).or_insert(0);
+        if *n >= max_per_file {
+            continue;
+        }
+        *n += 1;
+        diversified.push(r);
+        if diversified.len() >= limit {
+            break;
+        }
+    }
 
-    let results: Vec<Value> = enhanced_results.into_iter().map(|(_, r)| r).collect();
+    let results = diversified;
     let search_time_ms = search_start.elapsed().as_millis();
 
     // Index coverage check — surfaces "embeddings 71% complete" so the caller
@@ -330,11 +391,11 @@ pub async fn tool_search(args: Value, ctx: &ToolContext) -> Result<Value> {
         }
     }
 
-    // NEW: Feature 008 - Store in cache (only if not degraded for best quality)
+    // Store in cache (only if not degraded for best quality)
     if !degraded {
         if let Ok(result_json) = serde_json::to_string(&final_result) {
             ctx.cache
-                .put_search(query.to_string(), limit, result_json)
+                .put_search(cache_fingerprint, 0, result_json)
                 .await;
         }
     }
@@ -351,18 +412,23 @@ fn determine_match_reason(hit: &FusedHit, query: &str) -> Option<String> {
 
     // Check if matched via symbol name
     if let Some(ref symbol) = hit.matched_symbol {
-        if symbol.to_lowercase().contains(&query_lower) {
-            // Check symbol kind to be more specific
-            return Some(
-                match hit.symbol_kind.as_ref() {
-                    Some(SymbolKind::Function) => "FunctionName",
-                    Some(SymbolKind::Struct) | Some(SymbolKind::Class) => "ClassName",
-                    Some(SymbolKind::Enum) => "TypeDefinition",
-                    Some(SymbolKind::Trait) | Some(SymbolKind::Interface) => "TypeDefinition",
-                    _ => "SymbolName",
-                }
-                .to_string(),
-            );
+        let sym_l = symbol.to_lowercase();
+        let exact = query
+            .split(|c: char| !c.is_alphanumeric() && c != '_')
+            .any(|t| t.len() >= 2 && t.eq_ignore_ascii_case(symbol));
+        if exact || sym_l.contains(&query_lower) || query_lower.contains(&sym_l) {
+            let kind = match hit.symbol_kind.as_ref() {
+                Some(SymbolKind::Function) => "FunctionName",
+                Some(SymbolKind::Struct) | Some(SymbolKind::Class) => "ClassName",
+                Some(SymbolKind::Enum) => "TypeDefinition",
+                Some(SymbolKind::Trait) | Some(SymbolKind::Interface) => "TypeDefinition",
+                _ => "SymbolName",
+            };
+            return Some(if exact {
+                format!("{}Exact", kind)
+            } else {
+                kind.to_string()
+            });
         }
     }
 

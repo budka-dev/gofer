@@ -29,9 +29,11 @@ gofer = **index search + compact read** (16 MCP tools).
 | [15_read_function_context_comparison.md](15_read_function_context_comparison.md) | function context vs full file | 90%+ tokens |
 | [16_read_types_only_comparison.md](16_read_types_only_comparison.md) | types only vs full file | data-model focus |
 | [18_search_symbols_comparison.md](18_search_symbols_comparison.md) | `search_symbols` vs grep/ctags | name index |
+| [23_get_references_vs_grep_comparison.md](23_get_references_vs_grep_comparison.md) | refs/callers vs `rg` | resolved graph |
+| [24_get_callees_vs_manual_comparison.md](24_get_callees_vs_manual_comparison.md) | callees vs read body | 1-op nav |
+| [25_find_implementations_comparison.md](25_find_implementations_comparison.md) | impls vs grep | whole-token |
 
-**Ещё нет отдельных отчётов (желательно добавить):**  
-`get_references` / `get_callers` / `get_callees`, `find_implementations`, `find_by_type_signature`, `reindex` / `validate_index`.
+**Ещё нет:** `find_by_type_signature`, `reindex` / `validate_index` dedicated reports.
 
 ## MCP response envelope (2026-07)
 
