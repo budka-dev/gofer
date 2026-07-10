@@ -335,8 +335,7 @@ async fn handle_request(req: DaemonRequest, state: &Arc<DaemonState>) -> DaemonR
                 },
                 "capabilities": {
                     "tools": { "listChanged": true },
-                    "resources": { "subscribe": false, "listChanged": false },
-                    "prompts": { "listChanged": false }
+                    "resources": { "subscribe": false, "listChanged": false }
                 }
             }),
         ),
@@ -346,8 +345,8 @@ async fn handle_request(req: DaemonRequest, state: &Arc<DaemonState>) -> DaemonR
         "tools/call" => handle_tools_call(id, &req, state).await,
         "resources/list" => handle_resources_list(id, &req, state).await,
         "resources/read" => handle_resources_read(id, &req, state).await,
-        "prompts/list" => handle_prompts_list(id).await,
-        "prompts/get" => handle_prompts_get(id, &req, state).await,
+        "prompts/list" => DaemonResponse::success(id, json!({ "prompts": [] })),
+        "prompts/get" => DaemonResponse::error(id, -32601, "Prompts removed; use tools directly".into()),
 
         _ => {
             let (code, msg) = GoferError::MethodNotFound(req.method.clone()).into_rpc();
@@ -680,6 +679,7 @@ async fn handle_tools_call(
 
 // === MCP Resources ===
 
+
 async fn handle_resources_list(
     id: Value,
     _req: &DaemonRequest,
@@ -690,15 +690,9 @@ async fn handle_resources_list(
         json!({
             "resources": [
                 {
-                    "uri": "project://tree",
-                    "name": "Project Tree",
-                    "description": "Directory structure of the project",
-                    "mimeType": "application/json"
-                },
-                {
                     "uri": "project://stats",
-                    "name": "Project Stats",
-                    "description": "Index stats: file count and symbol counts by kind",
+                    "name": "Index Stats",
+                    "description": "File and symbol counts from the gofer index",
                     "mimeType": "application/json"
                 }
             ]
@@ -734,7 +728,6 @@ async fn handle_resources_read(
     };
 
     let result = match uri {
-        "project://tree" => tools::dispatch("project_tree", json!({"depth": 3}), &ctx).await,
         "project://stats" => resource_project_stats(&ctx).await,
         _ => {
             return DaemonResponse::error(id, -32602, format!("Unknown resource URI: {}", uri));
@@ -778,157 +771,6 @@ async fn resource_project_stats(ctx: &tools::ToolContext) -> anyhow::Result<Valu
     }))
 }
 
-async fn handle_prompts_list(id: Value) -> DaemonResponse {
-    DaemonResponse::success(
-        id,
-        json!({
-            "prompts": [
-                {
-                    "name": "review_code",
-                    "description": "Generate a code review prompt for a given file, including a context bundle.",
-                    "arguments": [
-                        { "name": "file", "description": "File to review", "required": true }
-                    ]
-                },
-                {
-                    "name": "explain_module",
-                    "description": "Generate a prompt to explain a module/file's purpose, dependencies, and architecture.",
-                    "arguments": [
-                        { "name": "file", "description": "File to explain", "required": true }
-                    ]
-                },
-                {
-                    "name": "find_related",
-                    "description": "Generate a prompt to find files/code related to a given concept or feature.",
-                    "arguments": [
-                        { "name": "query", "description": "Concept or feature to find related code for", "required": true }
-                    ]
-                }
-            ]
-        }),
-    )
-}
 
-async fn handle_prompts_get(
-    id: Value,
-    req: &DaemonRequest,
-    state: &Arc<DaemonState>,
-) -> DaemonResponse {
-    let name = req
-        .params
-        .get("name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let args = req.params.get("arguments").cloned().unwrap_or(json!({}));
-    let project_path = req.project_path();
 
-    let Some(pp) = project_path else {
-        return DaemonResponse::error(id, -32602, "Missing project_path".into());
-    };
 
-    let project = match state.get_or_load_project(pp).await {
-        Ok(p) => p,
-        Err(e) => return DaemonResponse::error(id, -32000, format!("Project load failed: {}", e)),
-    };
-
-    let ctx = tools::ToolContext {
-        sqlite: Arc::new(project.sqlite.clone()),
-        lance: Arc::clone(&project.lance),
-        embedder: Arc::clone(&project.embedder),
-        root_path: Arc::new(project.path.clone()),
-        cache: Arc::clone(&project.cache),
-        embedding_circuit: Arc::clone(&state.embedding_circuit),
-        vector_circuit: Arc::clone(&state.vector_circuit),
-    };
-
-    let result = match name {
-        "review_code" => prompt_review_code(&args, &ctx).await,
-        "explain_module" => prompt_explain_module(&args, &ctx).await,
-        "find_related" => prompt_find_related(&args, &ctx).await,
-        _ => {
-            return DaemonResponse::error(id, -32602, format!("Unknown prompt: {}", name));
-        }
-    };
-
-    match result {
-        Ok(messages) => DaemonResponse::success(id, json!({ "messages": messages })),
-        Err(e) => DaemonResponse::error(id, -32000, format!("Prompt error: {}", e)),
-    }
-}
-
-async fn prompt_review_code(args: &Value, ctx: &tools::ToolContext) -> anyhow::Result<Vec<Value>> {
-    let file = args.get("file").and_then(|v| v.as_str()).unwrap_or("");
-    if file.is_empty() {
-        return Err(anyhow::anyhow!("'file' argument is required"));
-    }
-
-    let bundle: serde_json::Value = tools::dispatch(
-        "context_bundle",
-        json!({"file": file, "skeleton_deps_only": true, "depth": 2}),
-        ctx,
-    )
-    .await?;
-
-    let bundle_text = serde_json::to_string_pretty(&bundle)?;
-
-    Ok(vec![json!({
-        "role": "user",
-        "content": {
-            "type": "text",
-            "text": format!(
-                "Review the following code file: `{}`\n\n## Context Bundle\n```json\n{}\n```\n\nProvide a thorough code review focusing on:\n1. Correctness and potential bugs\n2. Performance concerns\n3. Security issues\n4. Code style and readability",
-                file, bundle_text
-            )
-        }
-    })])
-}
-
-async fn prompt_explain_module(
-    args: &Value,
-    ctx: &tools::ToolContext,
-) -> anyhow::Result<Vec<Value>> {
-    let file = args.get("file").and_then(|v| v.as_str()).unwrap_or("");
-    if file.is_empty() {
-        return Err(anyhow::anyhow!("'file' argument is required"));
-    }
-
-    let skeleton: serde_json::Value =
-        tools::dispatch("skeleton", json!({"file": file}), ctx).await?;
-    let symbols: serde_json::Value =
-        tools::dispatch("get_symbols", json!({"file": file}), ctx).await?;
-
-    Ok(vec![json!({
-        "role": "user",
-        "content": {
-            "type": "text",
-            "text": format!(
-                "Explain the module `{}`.\n\n## Skeleton\n```json\n{}\n```\n\n## Symbols\n```json\n{}\n```\n\nProvide:\n1. Overall purpose and responsibility\n2. Key data structures and their roles\n3. Main functions/methods and their flow\n4. Dependencies and how they're used\n5. How this module fits into the larger architecture",
-                file,
-                serde_json::to_string_pretty(&skeleton)?,
-                serde_json::to_string_pretty(&symbols)?
-            )
-        }
-    })])
-}
-
-async fn prompt_find_related(args: &Value, ctx: &tools::ToolContext) -> anyhow::Result<Vec<Value>> {
-    let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
-    if query.is_empty() {
-        return Err(anyhow::anyhow!("'query' argument is required"));
-    }
-
-    let search_results: serde_json::Value =
-        tools::dispatch("search", json!({"query": query, "limit": 10}), ctx).await?;
-
-    Ok(vec![json!({
-        "role": "user",
-        "content": {
-            "type": "text",
-            "text": format!(
-                "Find all code related to: \"{}\"\n\n## Semantic Search Results\n```json\n{}\n```\n\nAnalyze these results and:\n1. Identify the key files involved\n2. Map the data/control flow related to this concept\n3. Identify any missing pieces or gaps\n4. Suggest where changes should be made if modifying this feature",
-                query,
-                serde_json::to_string_pretty(&search_results)?
-            )
-        }
-    })])
-}

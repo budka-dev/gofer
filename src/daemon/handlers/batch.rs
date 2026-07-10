@@ -1,6 +1,6 @@
 use super::common::ToolContext;
 use super::files::{
-    tool_read_file, tool_read_function_context, tool_read_types_only, tool_skeleton,
+    tool_read_function_context, tool_read_types_only, tool_skeleton,
 };
 use super::search::tool_search;
 use super::symbols::{tool_get_references, tool_get_symbols};
@@ -167,10 +167,6 @@ async fn execute_single_operation(
     let op_start = std::time::Instant::now();
 
     let (success, data, error) = match op_type {
-        "read_file" => match tool_read_file(params, ctx).await {
-            Ok(result) => (true, Some(result), None),
-            Err(e) => (false, None, Some(e.to_string())),
-        },
         "get_symbols" => match tool_get_symbols(params, ctx).await {
             Ok(result) => (true, Some(result), None),
             Err(e) => (false, None, Some(e.to_string())),

@@ -31,6 +31,7 @@ pub fn resolve_path(root: &Path, file: &str) -> String {
 use std::path::Component;
 
 /// Normalize a path (lexically resolve ".." and ".")
+#[allow(dead_code)]
 pub fn normalize_path(path: &Path) -> PathBuf {
     let mut components = path.components().peekable();
     let mut ret = if let Some(c @ Component::Prefix(..)) = components.peek().cloned() {
@@ -59,6 +60,7 @@ pub fn normalize_path(path: &Path) -> PathBuf {
 }
 
 /// Securely resolve path, preventing Path Traversal
+#[allow(dead_code)]
 pub fn resolve_path_buf(root: &Path, file: &str) -> anyhow::Result<PathBuf> {
     let p = Path::new(file);
     let absolute = if p.is_absolute() {
@@ -88,6 +90,7 @@ pub fn make_relative(root: &Path, abs_path: &str) -> String {
 }
 
 /// make_relative для PathBuf
+#[allow(dead_code)]
 pub fn make_relative_pathbuf(root: &Path, abs_path: &Path) -> String {
     abs_path
         .strip_prefix(root)

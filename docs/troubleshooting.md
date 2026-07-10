@@ -36,7 +36,7 @@
    curl -X POST http://127.0.0.1:8080/embed/ -d '{"texts":["test"]}' -H 'content-type: application/json'
    ```
 2. После пяти подряд ошибок `embedding_circuit` размыкается на 30 с (`src/error_recovery.rs`, конфиг в `daemon/state.rs:248`). После восстановления сервиса жди до 30 с, пока цепь сама не перейдёт в HalfOpen и не закроется.
-3. Поиск без эмбеддера: `search` отвалится. `grep`, `find_files`, `read_file`, `get_symbols`, `structural_search`, git-инструменты — работают, они не ходят в эмбеддер.
+3. Поиск без эмбеддера: `search` отвалится. `grep`, `find_files`, `read_file`, `get_symbols` — работают, они не ходят в эмбеддер.
 
 ## Индекс «битый» или неполный
 

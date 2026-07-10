@@ -1,6 +1,10 @@
-use super::common::ToolContext;
+use super::common::{resolve_path, ToolContext};
+use crate::error::GoferError;
+use crate::indexer::service::IndexerService;
 use anyhow::Result;
 use serde_json::{json, Value};
+use std::path::Path;
+use std::sync::Arc;
 
 pub async fn tool_get_index_status(ctx: &ToolContext) -> Result<Value> {
     use std::time::Instant;
@@ -131,7 +135,7 @@ pub async fn tool_get_index_status(ctx: &ToolContext) -> Result<Value> {
 
     if failed > 0 {
         warnings.push(format!("[error] {} files failed to index", failed));
-        recommendations.push("Run force_reindex on failed files to retry indexing".to_string());
+        recommendations.push("Call reindex path=<file> for failed files, or reindex force=true".to_string());
     }
 
     if pending > 0 {
@@ -144,7 +148,7 @@ pub async fn tool_get_index_status(ctx: &ToolContext) -> Result<Value> {
             "[warning] Index not synced in {} hours",
             age_minutes / 60
         ));
-        recommendations.push("Run force_reindex with scope=project to refresh index".to_string());
+        recommendations.push("Run reindex force=true to refresh index".to_string());
     }
 
     if completeness < 80.0 {
@@ -273,7 +277,7 @@ pub async fn tool_validate_index(ctx: &ToolContext) -> Result<Value> {
             "recommendation": {
                 "action": "reindex_files",
                 "paths": files_without_symbols.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(),
-                "command": format!("force_reindex with scope=directory and path containing these files"),
+                "command": format!("reindex with path= for each affected file, or reindex force=true for full rebuild"),
                 "estimated_time_seconds": files_without_symbols.len() * 2
             },
             "auto_fixable": true
@@ -357,7 +361,7 @@ pub async fn tool_validate_index(ctx: &ToolContext) -> Result<Value> {
             "recommendation": {
                 "action": "reindex_files",
                 "paths": failed_files.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(),
-                "command": "force_reindex with scope=file for each failed file",
+                "command": "reindex path=<file> for each failed file",
                 "estimated_time_seconds": failed_files.len() * 3
             },
             "auto_fixable": true
@@ -452,7 +456,7 @@ pub async fn tool_validate_index(ctx: &ToolContext) -> Result<Value> {
             "affected_items": ["embeddings: all files"],
             "recommendation": {
                 "action": "rebuild_index",
-                "command": "force_reindex with scope=project",
+                "command": "reindex force=true",
                 "estimated_time_seconds": file_count as u64 * 2
             },
             "auto_fixable": true
@@ -512,7 +516,7 @@ pub async fn tool_validate_index(ctx: &ToolContext) -> Result<Value> {
             "affected_items": [],
             "recommendation": {
                 "action": "reindex_files",
-                "command": "force_reindex with scope=project",
+                "command": "reindex force=true",
                 "estimated_time_seconds": stale_files as u64 * 2
             },
             "auto_fixable": true
@@ -551,3 +555,53 @@ pub async fn tool_validate_index(ctx: &ToolContext) -> Result<Value> {
     }))
 }
 
+/// Reindex one file, or clear symbol tables for a forced rebuild.
+pub async fn tool_reindex(args: Value, ctx: &ToolContext) -> Result<Value> {
+    let force = args.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+    let path = args.get("path").and_then(|v| v.as_str());
+
+    if force {
+        let pool = ctx.sqlite.pool();
+        sqlx::query("DELETE FROM symbol_references")
+            .execute(pool)
+            .await?;
+        sqlx::query("DELETE FROM symbols").execute(pool).await?;
+        sqlx::query("DELETE FROM files").execute(pool).await?;
+        let _ = sqlx::query("DELETE FROM dependency_usage").execute(pool).await;
+        ctx.cache.invalidate_all_searches().await;
+        return Ok(json!({
+            "ok": true,
+            "mode": "force_clear",
+            "message": "Cleared files/symbols/refs. Activate/sync the project (gofer start) to rebuild embeddings.",
+        }));
+    }
+
+    let Some(rel) = path else {
+        return Err(GoferError::InvalidParams(
+            "Provide path= for single-file reindex, or force=true to clear index".into(),
+        )
+        .into());
+    };
+
+    let abs = resolve_path(&ctx.root_path, rel);
+    let indexer = IndexerService::new(
+        (*ctx.sqlite).clone(),
+        Arc::clone(&ctx.lance),
+        Arc::clone(&ctx.embedder),
+        1,
+    )
+    .with_cache(Arc::clone(&ctx.cache));
+
+    indexer
+        .index_file(Path::new(&abs))
+        .await
+        .map_err(|e| GoferError::ToolError(format!("reindex failed: {}", e)))?;
+
+    ctx.cache.invalidate_all_searches().await;
+    Ok(json!({
+        "ok": true,
+        "mode": "file",
+        "path": rel,
+        "message": format!("Reindexed {}", rel),
+    }))
+}

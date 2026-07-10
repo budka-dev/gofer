@@ -261,33 +261,6 @@ pub async fn tool_get_callees(args: Value, ctx: &ToolContext) -> Result<Value> {
     }))
 }
 
-pub async fn tool_symbol_exists(args: Value, ctx: &ToolContext) -> Result<Value> {
-    let symbol = args.get("symbol").and_then(|v| v.as_str()).unwrap_or("");
-    let file = args.get("file").and_then(|v| v.as_str());
-
-    if symbol.is_empty() {
-        return Err(GoferError::InvalidParams("Symbol name is required".into()).into());
-    }
-
-    let exists = if let Some(f) = file {
-        let abs_path = resolve_path(&ctx.root_path, f);
-        // Check if symbol exists in specific file
-        let symbols = ctx
-            .sqlite
-            .get_symbols(Some(&abs_path), None, 0, 1000)
-            .await?;
-        symbols.iter().any(|s| s.name == symbol)
-    } else {
-        // Global check
-        let matches = ctx.sqlite.search_symbols(symbol, 1).await?;
-        !matches.is_empty()
-    };
-
-    Ok(json!({
-        "symbol": symbol,
-        "exists": exists
-    }))
-}
 
 
 /// Find functions/methods by type signature: return type and/or parameter type.

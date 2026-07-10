@@ -310,7 +310,7 @@ pub async fn tool_search(args: Value, ctx: &ToolContext) -> Result<Value> {
         // edits are likely unsearchable.
         if ratio < 1.0 {
             warnings.push(format!(
-                "Index coverage degraded: {:.2} chunks/file ({} files, {} chunks). Recent commits may be missing — run force_reindex.",
+                "Index coverage degraded: {:.2} chunks/file ({} files, {} chunks). Recent commits may be missing — call reindex force=true.",
                 ratio, file_count, chunk_count
             ));
             degraded = true;

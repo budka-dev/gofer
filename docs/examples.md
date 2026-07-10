@@ -1,3 +1,5 @@
+> **Note (2026-07):** surface trimmed to ~16 index-search tools. Examples mentioning `grep`, `read_file`, `structural_search`, `smart_file_selection`, git tools are historical — use host tools for FS/grep; gofer for search/skeleton/refs.
+
 # Примеры использования
 
 Этот документ — про то, **как работать с gofer'ом в реальных сценариях**. Команды и JSON-RPC вызовы взяты с рабочего инстанса, не из головы. Если хочешь понять архитектуру — иди в [architecture.md](architecture.md). Если ищешь параметры конкретного инструмента — в [tools-reference.md](tools-reference.md).
