@@ -1,6 +1,6 @@
 # gofer product plan — index search MCP only
 
-**Status:** quality++ — Lance wipe on force reindex, typed ref edges (inherit/type_usage), noise filter, live bench script.
+**Status:** backlog pass — module-level refs, chunks_fts content search, reindex cancel/progress, domain off hot path.
 
 **Principle:** index + search + compact read. Host agent owns FS, grep, git, edits, answers.  
 **Anti-goal:** replace host-agent tools.

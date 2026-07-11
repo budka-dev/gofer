@@ -140,7 +140,10 @@ pub async fn tool_get_index_status(ctx: &ToolContext) -> Result<Value> {
         r#"
         SELECT key, value
         FROM index_metadata
-        WHERE key IN ('last_full_sync', 'indexing_started_at', 'indexing_completed_at')
+        WHERE key IN (
+            'last_full_sync', 'indexing_started_at', 'indexing_completed_at',
+            'reindex_status', 'reindex_stage', 'reindex_updated_at'
+        )
         "#,
     )
     .fetch_all(ctx.sqlite.pool())
@@ -431,6 +434,11 @@ pub async fn tool_get_index_status(ctx: &ToolContext) -> Result<Value> {
             "stale": stale_count,
             "missing_on_disk": missing_count,
             "sample_stale": sample_stale,
+        },
+        "reindex": {
+            "status": meta_map.get("reindex_status").cloned().unwrap_or_default(),
+            "stage": meta_map.get("reindex_stage").cloned().unwrap_or_default(),
+            "updated_at": meta_map.get("reindex_updated_at").cloned().unwrap_or_default(),
         },
         "last_sync": last_sync_str,
         "age_minutes": age_minutes,
@@ -857,14 +865,47 @@ pub async fn tool_validate_index(ctx: &ToolContext) -> Result<Value> {
     }))
 }
 
+/// In-flight force reindex cancellation tokens, keyed by project root.
+static REINDEX_JOBS: std::sync::LazyLock<
+    dashmap::DashMap<String, tokio_util::sync::CancellationToken>,
+> = std::sync::LazyLock::new(dashmap::DashMap::new);
+
+async fn set_reindex_stage(sqlite: &crate::storage::SqliteStorage, stage: &str) {
+    let _ = sqlite.set_index_meta("reindex_status", "running").await;
+    let _ = sqlite.set_index_meta("reindex_stage", stage).await;
+    let _ = sqlite
+        .set_index_meta("reindex_updated_at", &chrono::Utc::now().to_rfc3339())
+        .await;
+}
+
 /// Reindex one file, or force a full clear + pipeline resync + ref resolution.
 pub async fn tool_reindex(args: Value, ctx: &ToolContext) -> Result<Value> {
     use std::time::Instant;
     use tokio_util::sync::CancellationToken;
 
     let force = args.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+    let cancel_req = args.get("cancel").and_then(|v| v.as_bool()).unwrap_or(false);
     let path = args.get("path").and_then(|v| v.as_str());
     let start = Instant::now();
+    let root_key = ctx.root_path.to_string_lossy().to_string();
+
+    if cancel_req {
+        if let Some((_, token)) = REINDEX_JOBS.remove(&root_key) {
+            token.cancel();
+            let _ = ctx.sqlite.set_index_meta("reindex_status", "cancelled").await;
+            let _ = ctx.sqlite.set_index_meta("reindex_stage", "cancelled").await;
+            return Ok(json!({
+                "ok": true,
+                "mode": "cancel",
+                "message": "Cancellation requested for in-flight force reindex.",
+            }));
+        }
+        return Ok(json!({
+            "ok": true,
+            "mode": "cancel",
+            "message": "No in-flight force reindex for this project.",
+        }));
+    }
 
     let indexer = IndexerService::new(
         (*ctx.sqlite).clone(),
@@ -875,6 +916,10 @@ pub async fn tool_reindex(args: Value, ctx: &ToolContext) -> Result<Value> {
     .with_cache(Arc::clone(&ctx.cache));
 
     if force {
+        let token = CancellationToken::new();
+        REINDEX_JOBS.insert(root_key.clone(), token.clone());
+
+        set_reindex_stage(&ctx.sqlite, "clearing").await;
         let pool = ctx.sqlite.pool();
         sqlx::query("DELETE FROM symbol_references")
             .execute(pool)
@@ -882,25 +927,67 @@ pub async fn tool_reindex(args: Value, ctx: &ToolContext) -> Result<Value> {
         sqlx::query("DELETE FROM symbols").execute(pool).await?;
         sqlx::query("DELETE FROM files").execute(pool).await?;
         let _ = sqlx::query("DELETE FROM dependency_usage").execute(pool).await;
+        let _ = ctx.sqlite.clear_chunks_fts().await;
 
         // Wipe vector store so orphan embeddings cannot survive the rebuild.
+        set_reindex_stage(&ctx.sqlite, "clearing_lance").await;
         ctx.lance
             .clear_all()
             .await
             .map_err(|e| GoferError::ToolError(format!("lance clear failed: {}", e)))?;
 
-        // Full disk → index rebuild (parse + embed + write).
-        indexer
+        if token.is_cancelled() {
+            REINDEX_JOBS.remove(&root_key);
+            let _ = ctx.sqlite.set_index_meta("reindex_status", "cancelled").await;
+            return Ok(json!({
+                "ok": true,
+                "mode": "force_full",
+                "cancelled": true,
+                "message": "Cancelled after clear.",
+            }));
+        }
+
+        // Progress mirror: pipeline updates SyncProgress stages; we also stamp meta.
+        set_reindex_stage(&ctx.sqlite, "full_sync").await;
+        let progress = Arc::new(crate::daemon::state::SyncProgress::new());
+        let sqlite_prog = ctx.sqlite.clone();
+        let progress_reader = Arc::clone(&progress);
+        let prog_task = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                let stage = progress_reader.stage.lock().await.clone();
+                if !stage.is_empty() {
+                    let _ = sqlite_prog.set_index_meta("reindex_stage", &stage).await;
+                }
+            }
+        });
+
+        let sync_result = indexer
             .full_sync(
                 ctx.root_path.as_path(),
                 &[],
+                Some(Arc::clone(&progress)),
                 None,
-                None,
-                CancellationToken::new(),
+                token.clone(),
             )
-            .await
-            .map_err(|e| GoferError::ToolError(format!("full reindex failed: {}", e)))?;
+            .await;
+        prog_task.abort();
+        REINDEX_JOBS.remove(&root_key);
 
+        if token.is_cancelled() {
+            let _ = ctx.sqlite.set_index_meta("reindex_status", "cancelled").await;
+            return Ok(json!({
+                "ok": true,
+                "mode": "force_full",
+                "cancelled": true,
+                "duration_ms": start.elapsed().as_millis(),
+                "message": "Force reindex cancelled during full_sync.",
+            }));
+        }
+
+        sync_result.map_err(|e| GoferError::ToolError(format!("full reindex failed: {}", e)))?;
+
+        set_reindex_stage(&ctx.sqlite, "resolving").await;
         let resolved = ctx.sqlite.resolve_references().await.unwrap_or(0);
         let _ = ctx
             .sqlite
@@ -909,6 +996,8 @@ pub async fn tool_reindex(args: Value, ctx: &ToolContext) -> Result<Value> {
                 &chrono::Utc::now().to_rfc3339(),
             )
             .await;
+        let _ = ctx.sqlite.set_index_meta("reindex_status", "done").await;
+        let _ = ctx.sqlite.set_index_meta("reindex_stage", "done").await;
         ctx.cache.invalidate_all_searches().await;
 
         let file_count = ctx.sqlite.get_file_count().await.unwrap_or(0);
@@ -920,7 +1009,7 @@ pub async fn tool_reindex(args: Value, ctx: &ToolContext) -> Result<Value> {
             "chunks": chunks,
             "refs_resolved": resolved,
             "duration_ms": start.elapsed().as_millis(),
-            "message": "Cleared SQLite + Lance, full_sync, resolved references.",
+            "message": "Cleared SQLite + Lance + chunks_fts, full_sync, resolved references.",
         }));
     }
 

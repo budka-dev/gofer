@@ -1,5 +1,7 @@
 //! Domain / tech-stack classification from path + content.
-//! Used when indexing files (stored on `files.domain` / `files.tech_stack`).
+//! Not used on the search MCP hot path (columns kept as "unknown"); retained for optional future use.
+
+#![allow(dead_code)]
 
 use smol_str::SmolStr;
 

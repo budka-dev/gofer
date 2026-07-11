@@ -15,12 +15,12 @@ use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
-use super::domains::{detect_domain, DomainConfig};
 use super::embedder::EmbedderPool;
 use super::parser::{CodeParser, SupportedLanguage};
 use crate::daemon::state::SyncProgress;
-use crate::models::{CodeChunk, ImportInfo, Symbol, SymbolReference};
+use crate::models::{CodeChunk, ImportInfo, Symbol, SymbolKind, SymbolReference};
 use crate::storage::{LanceStorage, SqliteStorage};
+use std::path::Path;
 
 // ---------------------------------------------------------------------------
 // Message types between pipeline stages
@@ -441,8 +441,9 @@ async fn parser_worker(
                 }
             };
 
-            let domain_config = DomainConfig::default_config();
-            let (domain, tech_stack) = detect_domain(&scanned.path, content_ref, &domain_config);
+            // Domain/tech_stack not used by search MCP surface — keep columns neutral.
+            let domain = SmolStr::new_static("unknown");
+            let tech_stack: Vec<SmolStr> = Vec::new();
 
             Ok(ParsedDoc {
                 path: scanned.path,
@@ -453,8 +454,8 @@ async fn parser_worker(
                 chunks: parsed_file.chunks,
                 refs: parsed_file.refs,
                 imports: parsed_file.imports,
-                domain: SmolStr::from(domain.as_str()),
-                tech_stack: tech_stack.into_iter().collect(),
+                domain,
+                tech_stack,
                 content: scanned.content,
             })
         })
@@ -896,6 +897,20 @@ async fn writer_stage(
                 );
                 lance_success = false;
             } else {
+                // Content FTS for hybrid keyword search (group chunks by file).
+                let mut by_file: HashMap<String, Vec<(String, i32, i32)>> = HashMap::new();
+                for c in &batch.chunks {
+                    by_file.entry(c.file_path.clone()).or_default().push((
+                        c.content.clone(),
+                        c.line_start as i32,
+                        c.line_end as i32,
+                    ));
+                }
+                for (path, rows) in by_file {
+                    if let Err(e) = sqlite.replace_chunks_fts(&path, &rows).await {
+                        tracing::warn!("Writer: chunks_fts update failed for {}: {}", path, e);
+                    }
+                }
                 tracing::debug!(
                     "Writer: successfully wrote {} chunks to LanceDB",
                     batch.chunks.len()
@@ -1064,8 +1079,27 @@ async fn flush_sqlite_batch(
         .await
         .unwrap_or_default();
 
-        // Assign each ref to the innermost enclosing symbol only (no outer+inner duplicates)
-        let refs_by_symbol = assign_refs_to_symbols(&stored_symbols, &file_meta.refs);
+        // File-scope module symbol for module-level refs (not inside any fn/type).
+        let _ = ensure_file_module_symbol_tx(
+            &mut tx,
+            file_id,
+            &file_meta.path,
+            file_meta.content.lines().count() as i32,
+        )
+        .await;
+        let stored_symbols: Vec<Symbol> = sqlx::query_as::<_, Symbol>(
+            "SELECT id, file_id, name, kind, line_start, line_end, signature FROM symbols WHERE file_id = ?",
+        )
+        .bind(file_id)
+        .fetch_all(&mut *tx)
+        .await
+        .unwrap_or(stored_symbols);
+        let fallback = stored_symbols
+            .iter()
+            .find(|s| s.kind == SymbolKind::Module && s.line_start == 0)
+            .map(|s| s.id);
+        let refs_by_symbol =
+            assign_refs_to_symbols(&stored_symbols, &file_meta.refs, fallback);
 
         for (symbol_id, symbol_refs) in refs_by_symbol {
             let _ = sqlx::query("DELETE FROM symbol_references WHERE source_symbol_id = ?")
@@ -1118,18 +1152,56 @@ async fn flush_sqlite_batch(
     coll.extend(metadata_for_collection.into_iter().map(|(_, m)| m));
 }
 
+/// Ensure a file-scope module symbol (line_start=0) for module-level refs.
+async fn ensure_file_module_symbol_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    file_id: i64,
+    path: &str,
+    max_line: i32,
+) -> Option<i64> {
+    let existing: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM symbols WHERE file_id = ? AND kind = 'module' AND line_start = 0 LIMIT 1",
+    )
+    .bind(file_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .ok()
+    .flatten();
+    if existing.is_some() {
+        return existing;
+    }
+    let name = Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("module")
+        .to_string();
+    let end = max_line.max(1);
+    let res = sqlx::query(
+        "INSERT INTO symbols (file_id, name, kind, line_start, line_end, signature) VALUES (?, ?, 'module', 0, ?, NULL)",
+    )
+    .bind(file_id)
+    .bind(&name)
+    .bind(end)
+    .execute(&mut **tx)
+    .await
+    .ok()?;
+    Some(res.last_insert_rowid())
+}
+
 /// Assign each reference to at most one enclosing source symbol — the innermost
 /// by span. Nested fn/method/impl must not produce duplicate sources (outer+inner).
 ///
 /// For each ref, candidates are symbols where:
 /// - `line_start <= ref.line <= line_end`
 /// - `ref.target_name != symbol.name` (skip self-name matches)
+/// - not synthetic file-scope module (`kind=module && line_start==0`) as innermost
 ///
 /// Among candidates, pick the smallest `(line_end - line_start)`; tie-break lower
-/// `line_start`, then higher `id`. Each ref is assigned at most once.
+/// `line_start`, then higher `id`. Unassigned refs go to `fallback_source_id`.
 pub(crate) fn assign_refs_to_symbols(
     symbols: &[Symbol],
     refs: &[SymbolReference],
+    fallback_source_id: Option<i64>,
 ) -> HashMap<i64, Vec<SymbolReference>> {
     let mut out: HashMap<i64, Vec<SymbolReference>> = HashMap::new();
 
@@ -1137,7 +1209,11 @@ pub(crate) fn assign_refs_to_symbols(
         let best = symbols
             .iter()
             .filter(|s| {
-                s.line_start <= r.line && r.line <= s.line_end && r.target_name != s.name
+                s.line_start <= r.line
+                    && r.line <= s.line_end
+                    && r.target_name != s.name
+                    // File-scope module (line_start==0) is fallback only — never "innermost".
+                    && !(s.kind == SymbolKind::Module && s.line_start == 0)
             })
             .min_by_key(|s| {
                 let span = s.line_end - s.line_start;
@@ -1146,6 +1222,8 @@ pub(crate) fn assign_refs_to_symbols(
 
         if let Some(s) = best {
             out.entry(s.id).or_default().push(r.clone());
+        } else if let Some(fid) = fallback_source_id {
+            out.entry(fid).or_default().push(r.clone());
         }
     }
 
@@ -1186,7 +1264,7 @@ mod tests {
         let symbols = vec![sym(1, "outer", 1, 20), sym(2, "inner", 5, 10)];
         let refs = vec![pref(7, "helper")];
 
-        let map = assign_refs_to_symbols(&symbols, &refs);
+        let map = assign_refs_to_symbols(&symbols, &refs, None);
 
         assert_eq!(map.len(), 1);
         assert!(map.contains_key(&2), "should assign to inner (id=2)");
@@ -1202,7 +1280,7 @@ mod tests {
         let symbols = vec![sym(10, "a", 1, 10), sym(20, "b", 1, 10)];
         let refs = vec![pref(5, "helper")];
 
-        let map = assign_refs_to_symbols(&symbols, &refs);
+        let map = assign_refs_to_symbols(&symbols, &refs, None);
         assert_eq!(map.len(), 1);
         assert!(map.contains_key(&20));
     }
@@ -1212,7 +1290,7 @@ mod tests {
         let symbols = vec![sym(1, "fn_a", 1, 5)];
         let refs = vec![pref(100, "helper")];
 
-        let map = assign_refs_to_symbols(&symbols, &refs);
+        let map = assign_refs_to_symbols(&symbols, &refs, None);
         assert!(map.is_empty());
     }
 
@@ -1223,7 +1301,7 @@ mod tests {
         let symbols = vec![sym(1, "outer", 1, 20), sym(2, "helper", 5, 10)];
         let refs = vec![pref(7, "helper")];
 
-        let map = assign_refs_to_symbols(&symbols, &refs);
+        let map = assign_refs_to_symbols(&symbols, &refs, None);
 
         assert_eq!(map.len(), 1);
         assert!(map.contains_key(&1), "outer should get the ref");
@@ -1239,7 +1317,7 @@ mod tests {
         ];
         let refs = vec![pref(20, "a"), pref(12, "b"), pref(2, "c")];
 
-        let map = assign_refs_to_symbols(&symbols, &refs);
+        let map = assign_refs_to_symbols(&symbols, &refs, None);
 
         let total: usize = map.values().map(|v| v.len()).sum();
         assert_eq!(total, 3, "each ref assigned exactly once");
@@ -1250,6 +1328,16 @@ mod tests {
         assert_eq!(map[&3][0].target_name, "a");
         assert_eq!(map[&2][0].target_name, "b");
         assert_eq!(map[&1][0].target_name, "c");
+    }
+
+    #[test]
+    fn fallback_assigns_module_level() {
+        let symbols = vec![sym(1, "fn_a", 1, 5)];
+        let refs = vec![pref(100, "helper")];
+        let map = assign_refs_to_symbols(&symbols, &refs, Some(99));
+        assert_eq!(map.len(), 1);
+        assert!(map.contains_key(&99));
+        assert_eq!(map[&99][0].target_name, "helper");
     }
 }
 

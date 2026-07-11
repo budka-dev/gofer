@@ -47,7 +47,7 @@ gofer — **read-only index-search MCP**, не замена native tools аге�
 
 | Tool | Args | Что делает |
 |---|---|---|
-| `search` | **query**, `limit`, `path`, `glob`, `include_scores`, `preview_mode`, `min_score`, `include_context`, `max_per_file` (3) | Hybrid vector+FTS. Exact symbol tokens boosted; diversify by file; content capped ~600 chars. |
+| `search` | **query**, `limit`, `path`, `glob`, `include_scores`, `preview_mode`, `min_score`, `include_context`, `max_per_file` (3) | Hybrid: vector + symbol FTS + **content** FTS (`chunks_fts`). Name/path boosts; diversify; content cap. |
 | `search_symbols` | **query**, `kind`, `limit` | Символы по имени/подстроке. |
 
 ## Символы и граф
@@ -77,7 +77,7 @@ gofer — **read-only index-search MCP**, не замена native tools аге�
 | `batch_operations` | **operations** (`search` \| `get_symbols` \| `skeleton` \| `get_references` \| `read_function_context` \| `read_types_only`), `parallel`, … | Несколько index-ops за один RPC. |
 | `get_index_status` | — | Completeness, embedder health probe, ref resolve %, sync age. |
 | `validate_index` | — | Integrity issues + recommendations. |
-| `reindex` | `force`, `path` | `path` — один файл + resolve; `force=true` — clear + **full_sync** + resolve (один call). |
+| `reindex` | `force`, `path`, `cancel` | `path` — файл + resolve; `force` — clear SQLite+Lance+chunks_fts + full_sync + resolve; `cancel` — abort force. Progress: `get_index_status.reindex`. |
 
 ## Resources
 

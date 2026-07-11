@@ -263,6 +263,7 @@ impl SqliteStorage {
             .bind(path)
             .execute(&self.pool)
             .await?;
+        let _ = self.delete_chunks_fts(path).await;
 
         Ok(())
     }
@@ -311,6 +312,133 @@ impl SqliteStorage {
 
         tx.commit().await?;
         Ok(())
+    }
+
+    /// Ensure a file-scope module symbol (line_start=0) exists for module-level refs.
+    pub async fn ensure_file_module_symbol(
+        &self,
+        file_id: i64,
+        path: &str,
+        max_line: i32,
+    ) -> Result<i64> {
+        if let Some(id) = sqlx::query_scalar::<_, i64>(
+            "SELECT id FROM symbols WHERE file_id = ? AND kind = 'module' AND line_start = 0 LIMIT 1",
+        )
+        .bind(file_id)
+        .fetch_optional(&self.pool)
+        .await?
+        {
+            return Ok(id);
+        }
+        let name = std::path::Path::new(path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("module")
+            .to_string();
+        let end = max_line.max(1);
+        let res = sqlx::query(
+            "INSERT INTO symbols (file_id, name, kind, line_start, line_end, signature) VALUES (?, ?, 'module', 0, ?, NULL)",
+        )
+        .bind(file_id)
+        .bind(&name)
+        .bind(end)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.last_insert_rowid())
+    }
+
+    /// Replace content FTS rows for a file (delete + insert chunks).
+    pub async fn replace_chunks_fts(
+        &self,
+        file_path: &str,
+        chunks: &[(String, i32, i32)],
+    ) -> Result<()> {
+        sqlx::query("DELETE FROM chunks_fts WHERE file_path = ?")
+            .bind(file_path)
+            .execute(&self.pool)
+            .await?;
+        for (content, line_start, line_end) in chunks {
+            // Truncate very large chunks for FTS index size.
+            let text = if content.len() > 8000 {
+                let mut end = 8000;
+                while end > 0 && !content.is_char_boundary(end) {
+                    end -= 1;
+                }
+                &content[..end]
+            } else {
+                content.as_str()
+            };
+            let _ = sqlx::query(
+                "INSERT INTO chunks_fts (file_path, content, line_start, line_end) VALUES (?, ?, ?, ?)",
+            )
+            .bind(file_path)
+            .bind(text)
+            .bind(line_start)
+            .bind(line_end)
+            .execute(&self.pool)
+            .await;
+        }
+        Ok(())
+    }
+
+    /// Delete content FTS rows for a file.
+    pub async fn delete_chunks_fts(&self, file_path: &str) -> Result<()> {
+        sqlx::query("DELETE FROM chunks_fts WHERE file_path = ?")
+            .bind(file_path)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Clear entire content FTS (force reindex).
+    pub async fn clear_chunks_fts(&self) -> Result<()> {
+        // Rebuild empty FTS table
+        sqlx::query("DELETE FROM chunks_fts")
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Keyword search over chunk bodies (content FTS).
+    pub async fn search_chunks_fts(
+        &self,
+        query: &str,
+        limit: i32,
+        path_filter: Option<&str>,
+    ) -> Result<Vec<(String, i32, String)>> {
+        let q = sanitize_fts5_query(query);
+        if q.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = if let Some(path) = path_filter {
+            sqlx::query_as::<_, (String, i32, String)>(
+                r#"
+                SELECT file_path, line_start, content
+                FROM chunks_fts
+                WHERE chunks_fts MATCH ? AND file_path LIKE ? || '%'
+                LIMIT ?
+                "#,
+            )
+            .bind(&q)
+            .bind(path)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as::<_, (String, i32, String)>(
+                r#"
+                SELECT file_path, line_start, content
+                FROM chunks_fts
+                WHERE chunks_fts MATCH ?
+                LIMIT ?
+                "#,
+            )
+            .bind(&q)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?
+        };
+        Ok(rows)
     }
 
     /// Search symbols using FTS5
@@ -559,8 +687,8 @@ impl SqliteStorage {
         .await?;
         total += r2.rows_affected();
 
-        // Pass 3: Global fallback — prefer exported/public definitions over private
-        // when multiple symbols share a name (reduces `new`/`parse` mis-binds).
+        // Pass 3: Global fallback — prefer methods/functions + exported over types/private.
+        // Helps method-name calls and reduces `new`/`parse` mis-binds onto structs.
         let r3 = sqlx::query(
             r#"
             UPDATE symbol_references
@@ -571,6 +699,11 @@ impl SqliteStorage {
                          SELECT s.id FROM symbols s
                          WHERE s.name = sr.target_name
                          ORDER BY
+                           CASE
+                             WHEN s.kind IN ('function', 'method') THEN 0
+                             WHEN s.kind IN ('struct', 'enum', 'class', 'trait', 'interface', 'type', 'type_alias', 'module') THEN 2
+                             ELSE 1
+                           END,
                            CASE
                              WHEN s.signature LIKE 'pub %' THEN 0
                              WHEN s.signature LIKE 'export %' THEN 0

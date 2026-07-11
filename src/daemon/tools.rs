@@ -349,12 +349,13 @@ pub fn core_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "reindex",
-            "description": "Rebuild index. path= one file + resolve_references. force=true clears tables, runs full_sync (parse+embed+write), resolves refs — single MCP call.",
+            "description": "Rebuild index. path= one file + resolve. force=true clears SQLite+Lance+chunks_fts, full_sync, resolve. cancel=true aborts in-flight force reindex. Progress: get_index_status.reindex.stage.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "force": { "type": "boolean", "description": "Full clear + full_sync + resolve (default false)", "default": false },
-                    "path": { "type": "string", "description": "Single file path relative to project root" }
+                    "path": { "type": "string", "description": "Single file path relative to project root" },
+                    "cancel": { "type": "boolean", "description": "Cancel in-flight force reindex for this project", "default": false }
                 }
             }
         })

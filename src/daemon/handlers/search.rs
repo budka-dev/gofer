@@ -193,7 +193,7 @@ pub async fn tool_search(args: Value, ctx: &ToolContext) -> Result<Value> {
             });
     }
 
-    // FTS results contribute
+    // Symbol FTS results contribute
     for (rank, sym) in fts_results.iter().enumerate() {
         let key = (sym.file_path.clone(), sym.line as u32);
         let mut rrf = 1.0 / (K + rank as f64 + 1.0) + path_boost(&sym.file_path);
@@ -220,6 +220,40 @@ pub async fn tool_search(args: Value, ctx: &ToolContext) -> Result<Value> {
                 vector_score: None,
                 matched_symbol: Some(sym.name.clone()),
                 symbol_kind: Some(sym.kind),
+            });
+    }
+
+    // Content-body FTS (chunk text) — fills gaps symbols FTS misses.
+    let content_fts = match ctx
+        .sqlite
+        .search_chunks_fts(&fts_query, (limit * 2) as i32, path_filter_abs.as_deref())
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::debug!("chunks_fts search skipped: {}", e);
+            Vec::new()
+        }
+    };
+    for (rank, (file_path, line_start, content)) in content_fts.into_iter().enumerate() {
+        let key = (file_path.clone(), line_start as u32);
+        let rrf = 1.0 / (K + rank as f64 + 1.0) + path_boost(&file_path) + 0.05;
+        scores
+            .entry(key)
+            .and_modify(|h| {
+                h.rrf_score += rrf;
+                if h.content.len() < content.len() {
+                    h.content = content.clone();
+                }
+            })
+            .or_insert(FusedHit {
+                file_path,
+                line_start: line_start as u32,
+                content,
+                rrf_score: rrf,
+                vector_score: None,
+                matched_symbol: None,
+                symbol_kind: None,
             });
     }
 

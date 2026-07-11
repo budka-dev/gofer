@@ -167,6 +167,11 @@ impl IndexerService {
             let texts: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
             let embeddings = self.embedder.embed(texts).await?;
             self.lance.upsert_chunks(&chunks, &embeddings).await?;
+            let fts_rows: Vec<(String, i32, i32)> = chunks
+                .iter()
+                .map(|c| (c.content.clone(), c.line_start as i32, c.line_end as i32))
+                .collect();
+            let _ = self.sqlite.replace_chunks_fts(&path_str, &fts_rows).await;
         }
 
         // SQLite operations safely execute AFTER LanceDB succeeds
@@ -184,11 +189,22 @@ impl IndexerService {
             .insert_symbols(file_id, &symbols_with_file_id)
             .await?;
 
+        // File-scope module for module-level refs.
+        let max_line = content.lines().count() as i32;
+        let _ = self
+            .sqlite
+            .ensure_file_module_symbol(file_id, &path_str, max_line)
+            .await;
         let stored_symbols = self.sqlite.get_file_symbols(file_id).await?;
+        let fallback = stored_symbols
+            .iter()
+            .find(|s| {
+                s.kind == crate::models::SymbolKind::Module && s.line_start == 0
+            })
+            .map(|s| s.id);
 
-        // Assign each ref to the innermost enclosing symbol only (no outer+inner duplicates)
         let refs_by_symbol =
-            pipeline::assign_refs_to_symbols(&stored_symbols, &all_refs);
+            pipeline::assign_refs_to_symbols(&stored_symbols, &all_refs, fallback);
 
         for (symbol_id, symbol_refs) in refs_by_symbol {
             if !symbol_refs.is_empty() {
@@ -219,6 +235,7 @@ impl IndexerService {
     async fn delete_file(&self, path: &Path) -> anyhow::Result<()> {
         let path_str = path.to_string_lossy().to_string();
         self.sqlite.delete_file(&path_str).await?;
+        let _ = self.sqlite.delete_chunks_fts(&path_str).await;
         {
             self.lance.delete_file(&path_str).await?;
         }
