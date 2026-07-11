@@ -1064,38 +1064,28 @@ async fn flush_sqlite_batch(
         .await
         .unwrap_or_default();
 
-        for symbol in &stored_symbols {
-            // Find refs that belong to this symbol's line range
-            let symbol_refs: Vec<&SymbolReference> = file_meta
-                .refs
-                .iter()
-                .filter(|r| {
-                    r.line >= symbol.line_start
-                        && r.line <= symbol.line_end
-                        && r.target_name != symbol.name
-                })
-                .collect();
+        // Assign each ref to the innermost enclosing symbol only (no outer+inner duplicates)
+        let refs_by_symbol = assign_refs_to_symbols(&stored_symbols, &file_meta.refs);
 
-            if !symbol_refs.is_empty() {
-                let _ = sqlx::query("DELETE FROM symbol_references WHERE source_symbol_id = ?")
-                    .bind(symbol.id)
-                    .execute(&mut *tx)
-                    .await;
+        for (symbol_id, symbol_refs) in refs_by_symbol {
+            let _ = sqlx::query("DELETE FROM symbol_references WHERE source_symbol_id = ?")
+                .bind(symbol_id)
+                .execute(&mut *tx)
+                .await;
 
-                // Batch insert references (chunks of 100)
-                for chunk in symbol_refs.chunks(100) {
-                    let mut builder = sqlx::QueryBuilder::new(
-                        "INSERT INTO symbol_references (source_symbol_id, target_name, target_symbol_id, kind, line) ",
-                    );
-                    builder.push_values(chunk.iter(), |mut b, r| {
-                        b.push_bind(symbol.id)
-                            .push_bind(&r.target_name)
-                            .push_bind(r.target_symbol_id)
-                            .push_bind(&r.kind)
-                            .push_bind(r.line);
-                    });
-                    let _ = builder.build().execute(&mut *tx).await;
-                }
+            // Batch insert references (chunks of 100)
+            for chunk in symbol_refs.chunks(100) {
+                let mut builder = sqlx::QueryBuilder::new(
+                    "INSERT INTO symbol_references (source_symbol_id, target_name, target_symbol_id, kind, line) ",
+                );
+                builder.push_values(chunk, |mut b, r| {
+                    b.push_bind(symbol_id)
+                        .push_bind(&r.target_name)
+                        .push_bind(r.target_symbol_id)
+                        .push_bind(&r.kind)
+                        .push_bind(r.line);
+                });
+                let _ = builder.build().execute(&mut *tx).await;
             }
         }
 
@@ -1128,4 +1118,138 @@ async fn flush_sqlite_batch(
     coll.extend(metadata_for_collection.into_iter().map(|(_, m)| m));
 }
 
+/// Assign each reference to at most one enclosing source symbol — the innermost
+/// by span. Nested fn/method/impl must not produce duplicate sources (outer+inner).
+///
+/// For each ref, candidates are symbols where:
+/// - `line_start <= ref.line <= line_end`
+/// - `ref.target_name != symbol.name` (skip self-name matches)
+///
+/// Among candidates, pick the smallest `(line_end - line_start)`; tie-break lower
+/// `line_start`, then higher `id`. Each ref is assigned at most once.
+pub(crate) fn assign_refs_to_symbols(
+    symbols: &[Symbol],
+    refs: &[SymbolReference],
+) -> HashMap<i64, Vec<SymbolReference>> {
+    let mut out: HashMap<i64, Vec<SymbolReference>> = HashMap::new();
+
+    for r in refs {
+        let best = symbols
+            .iter()
+            .filter(|s| {
+                s.line_start <= r.line && r.line <= s.line_end && r.target_name != s.name
+            })
+            .min_by_key(|s| {
+                let span = s.line_end - s.line_start;
+                (span, s.line_start, std::cmp::Reverse(s.id))
+            });
+
+        if let Some(s) = best {
+            out.entry(s.id).or_default().push(r.clone());
+        }
+    }
+
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::assign_refs_to_symbols;
+    use crate::models::{Symbol, SymbolKind, SymbolReference};
+
+    fn sym(id: i64, name: &str, line_start: i32, line_end: i32) -> Symbol {
+        Symbol {
+            id,
+            file_id: 1,
+            name: name.to_string(),
+            kind: SymbolKind::Function,
+            line_start,
+            line_end,
+            signature: None,
+        }
+    }
+
+    fn pref(line: i32, target_name: &str) -> SymbolReference {
+        SymbolReference {
+            id: 0,
+            source_symbol_id: 0,
+            target_name: target_name.to_string(),
+            target_symbol_id: None,
+            kind: "call".to_string(),
+            line,
+        }
+    }
+
+    #[test]
+    fn nested_outer_inner_picks_innermost() {
+        // outer: lines 1-20, inner: lines 5-10; ref at line 7
+        let symbols = vec![sym(1, "outer", 1, 20), sym(2, "inner", 5, 10)];
+        let refs = vec![pref(7, "helper")];
+
+        let map = assign_refs_to_symbols(&symbols, &refs);
+
+        assert_eq!(map.len(), 1);
+        assert!(map.contains_key(&2), "should assign to inner (id=2)");
+        assert!(!map.contains_key(&1), "must not also assign to outer");
+        assert_eq!(map[&2].len(), 1);
+        assert_eq!(map[&2][0].target_name, "helper");
+        assert_eq!(map[&2][0].line, 7);
+    }
+
+    #[test]
+    fn nested_tie_break_smaller_span_then_line_start_then_higher_id() {
+        // same span and start → higher id wins
+        let symbols = vec![sym(10, "a", 1, 10), sym(20, "b", 1, 10)];
+        let refs = vec![pref(5, "helper")];
+
+        let map = assign_refs_to_symbols(&symbols, &refs);
+        assert_eq!(map.len(), 1);
+        assert!(map.contains_key(&20));
+    }
+
+    #[test]
+    fn no_enclosing_symbol_leaves_ref_unassigned() {
+        let symbols = vec![sym(1, "fn_a", 1, 5)];
+        let refs = vec![pref(100, "helper")];
+
+        let map = assign_refs_to_symbols(&symbols, &refs);
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn name_skip_prefers_outer_when_inner_name_matches_target() {
+        // inner is named "helper" so it is skipped for a call to helper;
+        // outer should receive the ref.
+        let symbols = vec![sym(1, "outer", 1, 20), sym(2, "helper", 5, 10)];
+        let refs = vec![pref(7, "helper")];
+
+        let map = assign_refs_to_symbols(&symbols, &refs);
+
+        assert_eq!(map.len(), 1);
+        assert!(map.contains_key(&1), "outer should get the ref");
+        assert!(!map.contains_key(&2), "inner name matches target — skipped");
+    }
+
+    #[test]
+    fn each_ref_assigned_at_most_once() {
+        let symbols = vec![
+            sym(1, "outer", 1, 50),
+            sym(2, "mid", 10, 40),
+            sym(3, "inner", 15, 25),
+        ];
+        let refs = vec![pref(20, "a"), pref(12, "b"), pref(2, "c")];
+
+        let map = assign_refs_to_symbols(&symbols, &refs);
+
+        let total: usize = map.values().map(|v| v.len()).sum();
+        assert_eq!(total, 3, "each ref assigned exactly once");
+
+        assert_eq!(map.get(&3).map(|v| v.len()), Some(1)); // line 20 → inner
+        assert_eq!(map.get(&2).map(|v| v.len()), Some(1)); // line 12 → mid
+        assert_eq!(map.get(&1).map(|v| v.len()), Some(1)); // line 2 → outer
+        assert_eq!(map[&3][0].target_name, "a");
+        assert_eq!(map[&2][0].target_name, "b");
+        assert_eq!(map[&1][0].target_name, "c");
+    }
+}
 

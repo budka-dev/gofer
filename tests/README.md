@@ -53,3 +53,15 @@ On failure: `ok: false`, `error.message`, same `meta`. Symbols/refs/search `resu
 ## Как использовать
 
 Новый tool или оптимизация — добавь `tests/NN_<tool>_comparison.md` по методологии. Не сравнивай с host-tools, которые gofer **намеренно** не дублирует.
+
+## Live self-bench (golden queries)
+
+Quick smoke against a healthy daemon on **this** repo (index should be warm):
+
+```bash
+./scripts/self_bench.sh
+# single-query micro-bench:
+./scripts/bench_live.sh dispatch
+```
+
+`self_bench.sh` runs ≥5 golden searches (`dispatch`, `tool_search`, `resolve_references`, `skeleton`, `full_sync`), prints `wall_ms` per query, hard-fails on search crash, soft-warns if the first hit path misses an expected substring.

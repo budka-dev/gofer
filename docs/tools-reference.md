@@ -111,7 +111,8 @@ After updating tree-sitter query packs under `~/.gofer/langs/*/queries/`, run fo
 ## Live micro-bench
 
 ```bash
-./scripts/bench_live.sh dispatch
+./scripts/bench_live.sh dispatch          # single query
+./scripts/self_bench.sh                   # golden queries (dispatch, tool_search, …)
 ```
 
 Config: project `.gofer` / embed URL (see [config-reference.md](config-reference.md) if present).

@@ -1,4 +1,6 @@
-> **Note (2026-07):** surface trimmed to ~16 index-search tools. Examples mentioning `grep`, `read_file`, `structural_search`, `smart_file_selection`, git tools are historical — use host tools for FS/grep; gofer for search/skeleton/refs.
+> **Note (2026-07):** gofer is a **16-tool index-search MCP only** (hybrid search, symbols/refs/callers, skeleton / function_context / types / bundle, batch, index ops). It is **not** a host FS/grep/git/edit/execute layer.
+>
+> Scenarios or recipes that mention `read_file`, `grep`, `structural_search`, `smart_file_selection`, `suggest_commit`, `git_*`, `dependency_subgraph`, `health_check`, `get_cache_stats`, etc. are **HISTORICAL** — use host-agent tools for those jobs; use gofer for search / compact read / graph / index. Canonical list: [tools-reference.md](tools-reference.md).
 
 # Примеры использования
 
@@ -45,17 +47,17 @@
 
 **Задача:** ассистенту нужно объяснить, как работает функция `dispatch` в `daemon/tools.rs`.
 
-Наивный путь — `read_file` для всего файла (1444 строки → ~20 000 токенов).
+Наивный путь — полный `read_file` хоста для всего файла (тысячи строк → десятки тысяч токенов).
 
 **Эффективный путь через gofer:**
 
 ```
 1. search "tool dispatch routing"
-   → находит daemon/tools.rs:dispatch, src/main.rs handle_search
+   → находит daemon/tools.rs:dispatch
 
 2. read_function_context file="src/daemon/tools.rs" function="dispatch"
-   → ~200 строк: сама функция + типы (Value, ToolContext) + используемые импорты
-   → токенов: ~1500 вместо 20000
+   → сама функция + типы (Value, ToolContext) + используемые импорты
+   → токенов: порядка 10× меньше полного файла
 ```
 
 Если нужны ещё и реализации зависимых функций:
@@ -64,7 +66,7 @@
 read_function_context file="src/daemon/tools.rs" function="dispatch" include_callees=true
 ```
 
-Это вытащит на 1 уровень глубже все вызываемые функции (search::tool_search, files::tool_read_file, …).
+Это вытащит на 1 уровень глубже вызываемые handler'ы (`search::tool_search`, `symbols::…`, …).
 
 ## Сценарий 2. Понять файл целиком, не читая его
 
@@ -91,44 +93,42 @@ read_function_context file="src/daemon/tools.rs" function="dispatch" include_cal
 1. get_callers symbol="embed"
    → список всех файлов и строк с вызовами
 
-2. (для точного blast-radius) dependency_subgraph symbol="embed" direction="in"
-   → BFS-граф входящих зависимостей с глубиной до N уровней
+2. get_references symbol="embed"
+   → все использования имени (шире, чем только call)
+
+3. get_callees symbol="embed" file="src/indexer/embedder.rs"
+   → кого вызывает сама функция (blast radius наружу)
 ```
 
-`get_callers` работает из индекса (быстро, токено-экономно). `dependency_subgraph` строит более полную картину для сложных случаев.
+`get_callers` / `get_references` / `get_callees` работают из индекса (быстро, токено-экономно).  
+~~`dependency_subgraph`~~ — **HISTORICAL** (снят с surface); для глубокого BFS используй host + несколько graph tools.
 
 ## Сценарий 4. Сделать N запросов за один round-trip
 
-**Задача:** ассистент хочет получить структуру файла, прочитать конкретный фрагмент и поискать упоминания одной строки. Это 3 отдельных вызова MCP.
+**Задача:** ассистент хочет получить структуру файла, скелет и поискать упоминания одной строки. Это 3 отдельных вызова MCP.
 
 ```
 batch_operations operations=[
   {"type": "get_symbols", "params": {"file": "src/daemon/state.rs"}},
-  {"type": "read_file",   "params": {"file": "src/daemon/state.rs", "start_line": 22, "end_line": 80}},
+  {"type": "skeleton",    "params": {"file": "src/daemon/state.rs"}},
   {"type": "search",      "params": {"query": "embedding_circuit", "limit": 5}}
 ] parallel=true
 ```
 
-Все три уходят в работу параллельно, ответ приходит одним сообщением. На больших latency-чувствительных сценариях экономит 50–80% времени.
+Все три уходят в работу параллельно, ответ приходит одним сообщением. На latency-чувствительных сценариях экономит round-trips.
 
-Опции:
+Допустимые `type` в batch: `search` | `get_symbols` | `skeleton` | `get_references` | `read_function_context` | `read_types_only` (см. tools-reference).
 
-- `continue_on_error=true` — не валиться целиком, если один шаг не сработал (по умолчанию).
-- `summary_only=true` — отдать только статусы (полезно для health-чека).
-- `max_chars_per_op=8000` — резать каждый ответ, чтобы не разорвать контекст.
+## ~~Сценарий 5. Smart-коммит~~ — HISTORICAL
 
-## Сценарий 5. Smart-коммит
-
-**Задача:** ассистент готов закоммитить N изменённых файлов и хочет нормальное сообщение.
+> **Removed from MCP surface.** `git_diff` / `suggest_commit` больше не в 16-tool index-search set. Diff и commit message — через host `git` / agent tools.
 
 ```
-1. git_diff           (увидеть, что меняется)
-2. suggest_commit style=conventional include_emoji=false
-   → "feat(indexer): add embedding timeout to 30s"
-3. (создать коммит уже через стандартный git/bash)
+# was:
+# 1. git_diff
+# 2. suggest_commit style=conventional
+# 3. git commit …
 ```
-
-`suggest_commit` смотрит diff staged + unstaged, анализирует, что добавлено/удалено/изменено, и предлагает заголовок + тело в Conventional Commits.
 
 ## Сценарий 6. Только типы из файла
 
@@ -140,55 +140,32 @@ read_types_only file="src/daemon/state.rs"
    → только структуры/енумы, без impl-блоков методов
 ```
 
-Сильно дешевле, чем `read_file`, и точнее, чем `skeleton` (в skeleton сигнатуры функций тоже остаются).
+Сильно дешевле полного чтения файла хостом, и точнее, чем `skeleton` (в skeleton сигнатуры функций тоже остаются).
 
-## Сценарий 7. «Какие файлы важны для задачи X»
+## ~~Сценарий 7. «Какие файлы важны для задачи X»~~ — HISTORICAL
 
-**Задача:** ассистент не знает, с чего начать. Хочет ранжированный список релевантных файлов.
-
-```
-smart_file_selection
-  query="как работает graceful shutdown демона"
-  limit=5
-  min_score=0.3
-```
-
-Возвращает 5 файлов с оценкой релевантности. Дальше — `skeleton` по топ-3, и только потом `read_file` по тому, что нужно.
-
-Параметр `boost_recency` (0..1) добавляет вес недавним правкам — полезно, если задача касается активной разработки.
-
-## Сценарий 8. Полная диагностика проекта
-
-Когда что-то «не так» и непонятно где:
+> **`smart_file_selection` removed.** Use hybrid `search` (+ optional `min_score` / `include_scores`), then `skeleton` on top hits.
 
 ```
-1. get_index_status           # completeness, число файлов/чанков
-2. validate_index             # расхождения диск ↔ SQLite
-3. health_check               # sqlite/lance/embedder
-4. get_cache_stats            # hit-rate серверного LRU
-5. get_query_stats            # latency поиска
+search query="как работает graceful shutdown демона" limit=10 include_scores=true
+→ skeleton file=<top hit>
 ```
 
-Если `validate_index` показывает несоответствия — `force_reindex scope=project` восстанавливает консистентность. Снос диска (`rm -rf .gofer/data/`) — последняя инстанция.
+## Сценарий 8. Диагностика индекса
 
-## Сценарий 9. Структурный поиск по AST-паттернам
-
-**Задача:** найти все вызовы `.unwrap()` в Rust-коде без ложных срабатываний из комментариев и строк.
+Когда поиск «пустой» или индекс выглядит устаревшим:
 
 ```
-1. structural_search preset="rust_unwrap" path="src/"
-   → только реальные .unwrap() вызовы, без false positives из комментариев
-
-2. structural_search preset="rust_todo_unimplemented"
-   → todo!() и unimplemented!() по всему проекту
-
-3. structural_search query="(call_expression
-     function: (field_expression field: (field_identifier) @name
-       (#eq? @name \"unwrap\")))" language="rust"
-   → custom S-expression, то же, но полностью под твой контроль
+1. get_index_status           # completeness, sync age, embedder probe
+2. validate_index             # integrity issues + recommendations
+3. reindex force=true         # full_sync + resolve_references (or path= for one file)
 ```
 
-`structural_search` в разы точнее `grep` — работает на уровне AST, а не текста.
+~~`health_check` / `get_cache_stats` / `get_query_stats`~~ — **HISTORICAL** (не в core list). CLI: `gofer health` / `gofer status`. Снос диска (`rm -rf .gofer/data/`) — последняя инстанция.
+
+## ~~Сценарий 9. Структурный поиск по AST-паттернам~~ — HISTORICAL
+
+> **`structural_search` removed** from MCP surface. AST-precise unwrap/todo hunts: host `rg` / tree-sitter tooling. Semantic / symbol search remains via `search` / `search_symbols`.
 
 ## Сценарий 10. Поиск реализаций trait/interface
 
@@ -206,10 +183,11 @@ smart_file_selection
 
 Чего стоит избегать:
 
-- **`read_file` для целого файла >300 строк, если не нужны все детали.** Используй `skeleton` / `read_function_context` / `read_types_only`.
-- **`search` без `min_score`.** Низкокачественные совпадения с score 0.1 будут мусорить контекст.
+- **Полный host `read_file` для файла >300 строк, если не нужны все детали.** Используй gofer `skeleton` / `read_function_context` / `read_types_only`.
+- **`search` без фильтра качества на шумных запросах.** При необходимости `min_score` / `include_scores` + меньший `limit`.
 - **Сериализация инструментов, когда можно параллелить.** `batch_operations` экономит latency.
 - **Игнорирование `get_index_status` перед поиском после крупного git pull.** Индекс может быть устаревшим, watcher отрабатывает не мгновенно.
+- **Ожидание FS/grep/git/edit tools от gofer.** Их нет — 16 index-search tools only.
 
 ## Дальше
 

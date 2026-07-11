@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Live micro-bench against a running gofer daemon (current project cwd).
+# Single query. For multi golden-query self-bench, see ./scripts/self_bench.sh
 # Usage: ./scripts/bench_live.sh [query]
 set -euo pipefail
 
@@ -33,3 +34,4 @@ echo
 echo "== tip =="
 echo "Re-run after: gofer reindex --force   (or MCP reindex force=true)"
 echo "Compare host: rg -n '$QUERY' | head"
+echo "Golden queries: ./scripts/self_bench.sh"

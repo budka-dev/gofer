@@ -10,7 +10,7 @@ use super::pipeline;
 use super::watcher::IndexTask;
 use crate::cache::CacheManager;
 use crate::daemon::state::SyncProgress;
-use crate::models::{Symbol, SymbolReference};
+use crate::models::Symbol;
 use crate::storage::{LanceStorage, SqliteStorage};
 
 /// Indexer service that processes files and updates storage
@@ -186,20 +186,14 @@ impl IndexerService {
 
         let stored_symbols = self.sqlite.get_file_symbols(file_id).await?;
 
-        for symbol in &stored_symbols {
-            let symbol_refs: Vec<SymbolReference> = all_refs
-                .iter()
-                .filter(|r| {
-                    r.line >= symbol.line_start
-                        && r.line <= symbol.line_end
-                        && r.target_name != symbol.name
-                })
-                .cloned()
-                .collect();
+        // Assign each ref to the innermost enclosing symbol only (no outer+inner duplicates)
+        let refs_by_symbol =
+            pipeline::assign_refs_to_symbols(&stored_symbols, &all_refs);
 
+        for (symbol_id, symbol_refs) in refs_by_symbol {
             if !symbol_refs.is_empty() {
                 self.sqlite
-                    .insert_references(symbol.id, &symbol_refs)
+                    .insert_references(symbol_id, &symbol_refs)
                     .await?;
             }
         }

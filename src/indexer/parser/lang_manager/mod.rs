@@ -131,6 +131,97 @@ pub struct LanguageManager {
     pub download_locks: Arc<dashmap::DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
+/// Candidate roots for bundled tree-sitter query overlays (repo + packaged installs).
+///
+/// Order:
+/// 1. `CARGO_MANIFEST_DIR/langs/<lang>/queries` — repo-canonical packs
+/// 2. `CARGO_MANIFEST_DIR/tests/fixtures/langs/<lang>/queries` — test fixtures
+/// 3. `<exe_parent>/../share/gofer/langs/<lang>/queries` — packaged layout (if present)
+pub fn bundled_query_candidates(lang_name: &str) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    candidates.push(manifest_dir.join("langs").join(lang_name).join("queries"));
+    candidates.push(
+        manifest_dir
+            .join("tests")
+            .join("fixtures")
+            .join("langs")
+            .join(lang_name)
+            .join("queries"),
+    );
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_parent) = exe.parent() {
+            candidates.push(
+                exe_parent
+                    .join("..")
+                    .join("share")
+                    .join("gofer")
+                    .join("langs")
+                    .join(lang_name)
+                    .join("queries"),
+            );
+        }
+    }
+    candidates
+}
+
+/// Copy all `*.scm` from `source_queries` into `dest_queries`, creating `dest_queries` if needed.
+/// Returns the number of files copied.
+pub fn copy_bundled_scm_queries(
+    source_queries: &std::path::Path,
+    dest_queries: &std::path::Path,
+) -> Result<usize, std::io::Error> {
+    if !source_queries.is_dir() {
+        return Ok(0);
+    }
+    std::fs::create_dir_all(dest_queries)?;
+    let mut copied = 0usize;
+    for entry in std::fs::read_dir(source_queries)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("scm") {
+            continue;
+        }
+        let Some(name) = path.file_name() else {
+            continue;
+        };
+        std::fs::copy(&path, dest_queries.join(name))?;
+        copied += 1;
+    }
+    Ok(copied)
+}
+
+/// Overlay bundled query files onto an installed language pack.
+/// Uses the first existing candidate from `bundled_candidates` (or default search paths).
+/// Returns `Some(source_path)` when an overlay was applied, else `None`.
+pub fn overlay_bundled_queries_into(
+    lang_name: &str,
+    langs_dir: &std::path::Path,
+    bundled_candidates: Option<&[PathBuf]>,
+) -> Result<Option<PathBuf>, std::io::Error> {
+    let owned = if bundled_candidates.is_none() {
+        Some(bundled_query_candidates(lang_name))
+    } else {
+        None
+    };
+    let candidates: &[PathBuf] = match bundled_candidates {
+        Some(c) => c,
+        None => owned.as_deref().unwrap_or(&[]),
+    };
+
+    for candidate in candidates {
+        if !candidate.is_dir() {
+            continue;
+        }
+        let dest = langs_dir.join(lang_name).join("queries");
+        let n = copy_bundled_scm_queries(candidate, &dest)?;
+        if n > 0 {
+            return Ok(Some(candidate.clone()));
+        }
+    }
+    Ok(None)
+}
+
 impl LanguageManager {
     pub fn new(langs_dir: Option<PathBuf>, _tools_dir: Option<PathBuf>) -> Result<Self, LangManagerError> {
         let base_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".gofer");
@@ -166,6 +257,36 @@ impl LanguageManager {
             engine,
             download_locks: Arc::new(dashmap::DashMap::new()),
         })
+    }
+
+    /// Overlay repo/packaged `*.scm` queries onto the installed language pack on disk.
+    /// Prefer this after a lang-hub download so improved local queries win over stale hub packs.
+    pub fn overlay_bundled_queries(&self, lang_name: &str) -> Result<Option<PathBuf>, LangManagerError> {
+        match overlay_bundled_queries_into(lang_name, &self.langs_dir, None)? {
+            Some(src) => {
+                tracing::info!(
+                    "Overlaid bundled tree-sitter queries for '{}' from {}",
+                    lang_name,
+                    src.display()
+                );
+                Ok(Some(src))
+            }
+            None => {
+                tracing::debug!(
+                    "No bundled query overlay found for language '{}'",
+                    lang_name
+                );
+                Ok(None)
+            }
+        }
+    }
+
+    /// Re-apply bundled queries for a language already installed on disk (e.g. after
+    /// updating the gofer repo pack without re-downloading from lang-hub).
+    /// Does not reload in-memory queries; reinstall or restart to pick them up in a running process.
+    #[allow(dead_code)] // public API for tooling / manual refresh after pack updates
+    pub fn refresh_queries_from_bundle(&self, lang_name: &str) -> Result<Option<PathBuf>, LangManagerError> {
+        self.overlay_bundled_queries(lang_name)
     }
 
     /// Tries to resolve a language by file extension. 
@@ -406,6 +527,15 @@ impl LanguageManager {
                 }
             }
         }
+
+        // Prefer repo/packaged improved queries over stale lang-hub packs.
+        if let Err(e) = self.overlay_bundled_queries(lang_name) {
+            tracing::warn!(
+                "Failed to overlay bundled queries for '{}': {}",
+                lang_name,
+                e
+            );
+        }
         
         tracing::info!("Successfully downloaded {} from lang-hub", lang_name);
         
@@ -417,6 +547,7 @@ impl LanguageManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     #[test]
     fn test_load_language_from_disk() {
@@ -453,5 +584,81 @@ mod tests {
             },
             Err(e) => panic!("Failed to load rust: {:?}", e),
         }
+    }
+
+    #[test]
+    fn test_overlay_bundled_queries_overwrites_hub_pack() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let langs_dir = tmp.path().join("langs");
+        let dest_queries = langs_dir.join("rust").join("queries");
+        std::fs::create_dir_all(&dest_queries).unwrap();
+
+        // Simulate a stale lang-hub download
+        let hub_refs = dest_queries.join("references.scm");
+        std::fs::write(&hub_refs, "; stale hub references\n").unwrap();
+
+        let bundle = tmp.path().join("bundle").join("queries");
+        std::fs::create_dir_all(&bundle).unwrap();
+        let bundled_content = "; bundled improved references\n(type_identifier) @type_usage\n";
+        let mut f = std::fs::File::create(bundle.join("references.scm")).unwrap();
+        f.write_all(bundled_content.as_bytes()).unwrap();
+        // Extra file only in bundle should also land
+        std::fs::write(bundle.join("symbols.scm"), "(function_item) @function\n").unwrap();
+
+        let candidates = [bundle.clone()];
+        let applied = overlay_bundled_queries_into("rust", &langs_dir, Some(&candidates))
+            .expect("overlay should succeed")
+            .expect("should apply overlay");
+        assert_eq!(applied, bundle);
+
+        let after = std::fs::read_to_string(&hub_refs).unwrap();
+        assert_eq!(after, bundled_content);
+        assert!(dest_queries.join("symbols.scm").exists());
+        assert_eq!(
+            std::fs::read_to_string(dest_queries.join("symbols.scm")).unwrap(),
+            "(function_item) @function\n"
+        );
+    }
+
+    #[test]
+    fn test_overlay_bundled_queries_skips_missing_candidates() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let langs_dir = tmp.path().join("langs");
+        std::fs::create_dir_all(langs_dir.join("rust").join("queries")).unwrap();
+
+        let missing = tmp.path().join("does-not-exist");
+        let applied =
+            overlay_bundled_queries_into("rust", &langs_dir, Some(&[missing])).unwrap();
+        assert!(applied.is_none());
+    }
+
+    #[test]
+    fn test_refresh_queries_from_bundle_uses_repo_pack() {
+        // Integration-ish: real repo langs/rust/queries should exist and overlay into a temp dir.
+        let repo_pack = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("langs")
+            .join("rust")
+            .join("queries");
+        if !repo_pack.join("references.scm").exists() {
+            println!("Skipping: repo pack langs/rust/queries/references.scm missing");
+            return;
+        }
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let langs_dir = tmp.path().join("langs");
+        let dest = langs_dir.join("rust").join("queries");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("references.scm"), "; hub\n").unwrap();
+
+        let manager = LanguageManager::new(Some(langs_dir.clone()), None).unwrap();
+        let src = manager
+            .refresh_queries_from_bundle("rust")
+            .expect("refresh ok")
+            .expect("overlay applied");
+        assert!(src.ends_with(PathBuf::from("langs/rust/queries")) || src == repo_pack);
+
+        let content = std::fs::read_to_string(dest.join("references.scm")).unwrap();
+        assert!(content.contains("@type_usage") || content.contains("@call"));
+        assert!(!content.starts_with("; hub"));
     }
 }

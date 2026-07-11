@@ -101,7 +101,7 @@ gofer health
 | `gofer reindex [--force] [--path F]` | Инкрементальная или полная переиндексация (опционально одного файла). |
 | `gofer logs [-n N] [-f] [--err]` | Хвост `~/.gofer/daemon.log` или `daemon.err`. |
 | `gofer config [init\|path]` | Показать/инициализировать `.gofer/config.toml`. |
-| `gofer install-lang <name>` | Скачать tree-sitter wasm-грамматику из lang-hub. |
+| `gofer install-lang <name>` | Скачать tree-sitter wasm-грамматику из lang-hub (затем накладывает bundled `langs/<name>/queries/*.scm` поверх hub-пака). |
 
 ## Конфигурация
 

@@ -35,17 +35,14 @@ gofer — это один бинарь с несколькими режимам�
 |---|---|---|
 | `main.rs` | CLI (clap), демонизация, helper `ensure_daemon_running`. | `main.rs` |
 | `daemon/` | Состояние демона, IPC-сервер, маршрутизатор инструментов, HTTP-метрики. | `daemon/state.rs`, `daemon/tools.rs`, `daemon/metrics_http.rs` |
-| `daemon/handlers/` | Реализации MCP-инструментов, разбитые по группам. | `handlers/{files,search,symbols,git,lsp,index,batch,...}.rs` |
+| `daemon/handlers/` | Реализации MCP-инструментов (16 index-search tools). | `handlers/{files,search,symbols,index,batch,common}.rs` |
 | `ipc/` | JSON-RPC поверх Unix-сокета: `server`, `client`, `protocol`, `bridge` (stdio↔socket). | `ipc/server.rs`, `ipc/bridge.rs` |
-| `indexer/` | Пайплайн индексации, watcher, эмбеддер, git-интеграция, domains. | `indexer/pipeline.rs`, `indexer/service.rs`, `indexer/watcher.rs`, `indexer/embedder.rs` |
+| `indexer/` | Пайплайн индексации, watcher, эмбеддер, domains. | `indexer/pipeline.rs`, `indexer/service.rs`, `indexer/watcher.rs`, `indexer/embedder.rs` |
 | `indexer/parser/` | tree-sitter обвязка: динамический менеджер языков, chunking, skeleton extraction. | `parser/core.rs`, `parser/lang_manager/`, `parser/chunking.rs`, `parser/skeleton.rs` |
 | `storage/` | Метаданные в SQLite (sqlx), векторы в LanceDB. | `storage/sqlite.rs`, `storage/lance.rs` |
-| `languages/` | Вспомогательные парсеры для language-specific метаданных (Vue-дерево). | `languages/vue.rs` |
-| `cache.rs` | Серверный LRU-кеш ответов на инструменты. | `cache.rs` |
-| `commit.rs` | Smart-commit генератор сообщений. | `commit.rs` |
+| `cache.rs` | Серверный LRU-кеш ответов на инструменты (в т.ч. rkyv symbol cache). | `cache.rs` |
 | `error_recovery.rs` | Circuit breakers для эмбеддера и векторного поиска. | `error_recovery.rs` |
 | `resource_limits.rs` | Семафоры и rate limits для соединений и запросов. | `resource_limits.rs` |
-| `scoring_index.rs` | rkyv zero-copy «горячий» индекс для скоринга файлов. | `scoring_index.rs` |
 | `logger.rs` | Инициализация `tracing` для трёх ролей (cli, mcp, daemon). | `logger.rs` |
 
 Полный список миграций SQLite — в `migrations/001_*.sql` … `017_drop_summaries.sql`.
@@ -153,19 +150,17 @@ gofer down       → daemon/shutdown               → cancel + drop всех п
 
 Когда приходит `tools/call` с `name: "..."` и `arguments: {...}`, сервер вызывает `daemon::tools::dispatch(name, args, ctx)` (`src/daemon/tools.rs`). `ToolContext` собирается из текущего `ProjectState` (sqlite, lance, embedder, lsp manager, кеш, метрики) и передаётся в конкретный handler.
 
-Handlers сгруппированы по семантическим доменам (`src/daemon/handlers/`):
+Handlers сгруппированы по семантическим доменам (`src/daemon/handlers/`). **Канон — `tools.rs::dispatch` + `core_tools_list` (~16 tools):**
 
-| Группа | Файл | Примеры инструментов |
+| Группа | Файл | Инструменты |
 |---|---|---|
-| files | `files.rs` | `read_file`, `read_function_context`, `read_types_only`, `skeleton`, `grep`, `find_files`, `context_bundle` |
-| search | `search.rs` | `search`, `search_by_purpose`, `search_symbols`, `smart_file_selection`, `structural_search` |
-| symbols | `symbols.rs` | `get_symbols`, `get_references`, `get_callers`, `get_callees`, `symbol_exists`, `is_exported`, `find_unused_symbols`, `find_unused_imports`, `call_path`, `dependency_subgraph`, `find_implementations`, `find_by_type_signature` |
-| project | `project.rs` | `project_tree`, `get_dependencies`, `dependency_impact`, `domain_stats`, `get_vue_tree`, `get_config_keys` |
-| git | `git.rs` | `git_diff`, `git_blame`, `git_history`, `suggest_commit` |
-| index | `index.rs` | `get_index_status`, `validate_index`, `force_reindex`, `get_cache_stats`, `get_query_stats`, `has_tests_for`, `health_check` |
-| batch | `batch.rs` | `batch_operations` — N инструментов в одном вызове. |
+| search | `search.rs` | `search` |
+| symbols | `symbols.rs` | `search_symbols`, `get_symbols`, `get_references`, `get_callers`, `get_callees`, `find_implementations`, `find_by_type_signature` |
+| files | `files.rs` | `skeleton`, `read_function_context`, `read_types_only`, `context_bundle` |
+| index | `index.rs` | `get_index_status`, `validate_index`, `reindex` |
+| batch | `batch.rs` | `batch_operations` |
 
-Полный список см. в [tools-reference.md](tools-reference.md).
+FS/grep/git/LSP/mutation handlers сняты (read-only index-search model). Полный список — [tools-reference.md](tools-reference.md).
 
 ## Пайплайн индексации
 
@@ -244,9 +239,9 @@ URL и имя модели берутся из секции `[embedding]` про
 
 После записи pipeline делает `compact()` (объединение мелких фрагментов). Индексы строятся лениво при первом запросе.
 
-### Hot scoring index (`src/scoring_index.rs`)
+### ~~Hot scoring index (`src/scoring_index.rs`)~~ — removed
 
-`rkyv` zero-copy серилиализованный снапшот, который читается mmap'ом для быстрого скоринга файлов по запросу (без обращения к SQLite). Используется в `smart_file_selection` и `search` для ранжирования.
+Отдельный rkyv mmap `scoring_index` / `smart_file_selection` **удалены** с surface. Hybrid ranking живёт в `handlers/search.rs` (vector + FTS + symbol boost). `rkyv` по-прежнему используется для embedding blobs в SQLite и LRU symbol cache (`cache.rs`).
 
 ## Мультиязычность через tree-sitter
 
@@ -361,30 +356,13 @@ gofer — язык-агностичный инструмент. Поддержк
 
 `ResourceLimits::default()` сейчас держит `max_concurrent_requests = 1024`. Каждый MCP-запрос получает `RequestGuard`, который освобождается на drop. При исчерпании — `ResourceLimitError::TooManyRequests { current, max }`. Помимо этого `DaemonState::connection_semaphore` ограничивает 1024 одновременными tcp-соединениями (см. `ipc/server.rs:38`).
 
-### `scoring_index.rs`
+### ~~`scoring_index.rs` / `commit.rs`~~ — removed
 
-`ScoringIndex` — `HashMap<file_path, FileScoringData>`, где `FileScoringData` хранит `symbol_names`, `symbol_kinds`, `summary`, `size_bytes`, `last_modified`, `domain`. Сериализуется через `rkyv` (`Archive`, `check_bytes`), пишется на диск (`save_to_file`) и читается mmap-ом (`load_from_file`). Цель — решить N+1 в `smart_file_selection`, не дёргая SQLite на каждый файл-кандидат.
-
-`version: u32` — ручной счётчик инвалидации схемы; `built_at` — таймстемп билда. Перестроение триггерится после успешного `full_sync` и в фоне при больших инкрементах.
-
-### `commit.rs`
-
-`CommitSuggestion`/`CommitMessage`/`ChangeAnalysis`/`SafetyReport`. Логика выбора `type`:
-
-- `docs` — изменения только в `*.md`, doc-комментариях, файлах `docs/`.
-- `feat` — добавлены новые символы (publicly exported).
-- `fix` — изменены тела существующих функций, есть слова `fix`/`bug` в путях.
-- Прочие маппинги в коде между `200`-`350` строкой `commit.rs`.
-
-`style: "conventional"` форматирует как `<type>(<scope>): <subject>`. `include_emoji: true` добавляет суффикс из таблицы (`feat: ✨`, `fix: 🐛`, `docs: 📝` и т. д.).
-
-`SafetyReport` — отдельный pre-check на потенциальные секреты в diff (по regex'ам) и попадание под shipping-freezes (если правила прописаны).
+Отдельный hot scoring index и MCP `suggest_commit` сняты с read-only surface. Commit messages — host `git` / agent. Ranking — в `handlers/search.rs`.
 
 ### `domains`
 
-Файлы при индексации тегируются доменом (`backend`, `frontend`, `ops`, `shared`, `rs` и т. п.) по `[domains]` из `.gofer/config.toml`. Маппинг path → domain — в `indexer/domains.rs`. Cross-stack links (между backend-эндпоинтами и frontend-вызовами) хранятся в SQL-таблице из миграции `007_structural_links.sql` и доступны через `get_api_routes` (в коде есть, в dispatch не зарегистрирован — `#[allow(dead_code)]`).
-
-`domain_stats` (зарегистрирован) отдаёт распределение `домен → число файлов`.
+Файлы при индексации тегируются доменом (`backend`, `frontend`, `ops`, `shared`, `rs` и т. п.) по эвристикам в `indexer/domains.rs` (и опционально config). Cross-stack links (миграции `007_structural_links.sql`) могут заполняться при индексации; отдельного MCP tool (`get_api_routes` / `domain_stats`) в текущем dispatch **нет**.
 
 ## Миграции SQLite
 
@@ -435,20 +413,17 @@ gofer — язык-агностичный инструмент. Поддержк
 | **dispatch** | Единая точка маршрутизации `tools/call` (`src/daemon/tools.rs::dispatch`). |
 | **domain** | Логическая зона проекта: `backend`/`frontend`/`ops`/`shared`. Назначается файлу при индексации по эвристике пути. |
 | **EmbedderPool** | Пул HTTP-клиентов для внешнего эмбеддера, с семафором ограничивающим параллелизм. |
-| **golden sample** | Помеченный пользователем «образцовый» файл — учитывается в `search_by_purpose` как анкор. |
-| **incremental indexing** | Переиндексация только изменённых файлов; включается, когда `gofer reindex` без `--force`. |
+| **incremental indexing** | Переиндексация только изменённых файлов; `reindex` без `force` / watcher. |
 | **lang-hub** | Внешний репозиторий с wasm-грамматиками tree-sitter, который `gofer install-lang` качает. |
 | **MCP** | Model Context Protocol — стандарт интеграции LLM-агентов с внешними инструментами. gofer выставляет себя как MCP-сервер. |
 | **MCP bridge** | `gofer mcp` — процесс, транслирующий stdio JSON-RPC от клиента в сокет демона. |
 | **pipeline** | Пятиступенчатый асинхронный конвейер индексации (`scanner → parser → batcher → embedder → writer`). |
-| **ProjectState** | Долгоживущий объект демона на каждый активный проект: SQLite, LanceDB, embedder pool, watcher, LSP-клиенты. |
-| **rkyv** | Бинарный сериализатор с zero-copy десериализацией через mmap. Используется в `scoring_index`. |
-| **scoring index** | Горячий mmap-индекс файла → его символы/размер/домен для быстрого ранжирования (`smart_file_selection`). |
+| **ProjectState** | Долгоживущий объект демона на каждый активный проект: SQLite, LanceDB, embedder pool, watcher. |
+| **rkyv** | Бинарный сериализатор с zero-copy десериализацией. Embedding blobs в SQLite + LRU symbol cache (`cache.rs`). |
 | **skeleton** | Файл без тел функций — только сигнатуры, типы, doc-комментарии. |
-| **smart commit** | Эвристический генератор commit-message по diff'у (`commit.rs`). |
-| **sync** | Полный проход по проекту: scan → parse → index. Запускается `gofer start`. |
+| **sync** | Полный проход по проекту: scan → parse → index (`full_sync`). Запускается `gofer start` / `reindex force=true`. |
 | **tool** | MCP-инструмент, выставленный через `tools/list`. У каждого есть JSON-Schema аргументов. |
-| **ToolContext** | Структура с зависимостями для handler'а: `sqlite`, `lance`, `embedder`, `cache`, `lsp`, circuit breakers. |
+| **ToolContext** | Структура с зависимостями для handler'а: `sqlite`, `lance`, `embedder`, `cache`, circuit breakers. |
 | **watcher** | Поток на `notify` + `notify-debouncer-mini`, реагирующий на изменения файлов. Дебаунс 500 мс. |
 
 ## Лимиты и константы

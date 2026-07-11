@@ -40,7 +40,8 @@ URL'ы захардкожены в `src/indexer/parser/lang_manager/mod.rs::inst
        ├── references.scm
        └── ...
    ```
-5. Загружает пакет (`load_language_from_disk`). После этого язык доступен для индексации.
+5. **Накладывает bundled queries** из репозитория gofer (`langs/<name>/queries/*.scm`, иначе fixtures / `share/gofer/langs/...`) поверх скачанных — улучшенные `references.scm` (inherit, type_usage и т.п.) всегда побеждают устаревшие hub-паки.
+6. Загружает пакет (`load_language_from_disk`). После этого язык доступен для индексации.
 
 ## Auto-download
 

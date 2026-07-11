@@ -2,39 +2,39 @@
 
 Срез текущего состояния gofer'а. Этот документ — честная сводка «что работает», «что наполовину», «что в архиве идей». Если в коде что-то поменялось — этот файл может отставать; авторитет — `git log` и `src/daemon/tools.rs::dispatch`.
 
-Дата среза: **2026-05-28**.
+Дата среза: **2026-07** (surface = **16 read-only index-search tools**; см. `tools.rs::dispatch`).
 
 ## Уровни статуса
 
 - ✅ **Готово** — фича работает и доступна через MCP/CLI.
 - 🟡 **Частично** — фича частично реализована или работает с ограничениями (описаны).
 - 🔵 **В планах** — есть дизайн в `docs/archive/`, но кода нет либо он на ранней стадии.
-- ❌ **Не делается** — фича обсуждалась, но решение «не нужно».
+- ❌ **Удалено / не делается** — снято с surface или решение «не нужно».
 
 ## Phase 0: Foundation
 
-Самый старый набор — базовый стек.
+Базовый стек. Многие бывшие MCP tools сняты при переходе на read-only index-search model.
 
 | Фича | Статус | Комментарий |
 |---|---|---|
-| 001 `get_index_status` | ✅ | Возвращает completeness, sync timestamps. |
-| 002 `validate_index` | ✅ | Сравнивает диск с SQLite, помечает расхождения. |
-| 003 `force_reindex` | ✅ | Scope: file/directory/project. |
-| 004 `read_file_skeleton` → `skeleton` | ✅ | Полнофункциональный AST-based. |
-| 005 Lightweight checks (`symbol_exists`, `is_exported`, `has_documentation`, `file_exists`, `has_tests_for`) | 🟡 | `has_documentation` — заглушка (всегда `false`); остальные работают. См. [tools-reference.md](tools-reference.md#символы-и-ссылки). |
-| 006 `search_with_scores` | ✅ | Параметр `include_scores: true` в `search`. |
-| 007 `suggest_commit` | ✅ | Conventional Commits с эвристикой. Без `rerank`-этапа. |
-| 008 Server-side cache | ✅ | LRU `CacheManager` в `cache.rs`, статистика через `get_cache_stats`. |
-| 009 `read_function_context` | 🟡 | Работает; глубина `include_callees=true` ограничена 1 уровнем. |
-| 010 `read_types_only` | ✅ | Фильтрация по `kind`, включение docs. |
-| 011 `smart_file_selection` | ✅ | Гибридный скоринг через `scoring_index`. |
-| 012 Incremental indexing | ✅ | Через `chunk_cache` + watcher. |
-| 013 `batch_operations` | ✅ | До 4 типов операций (read_file, get_symbols, search, skeleton). |
-| 014 Query optimization | ✅ | Индексы из миграции `014_query_optimization.sql`, статистика через `get_query_stats`. |
-| 015 Connection pooling | ✅ | `ResourceLimits` + semaphore 1024. |
-| 016 Error recovery | ✅ | Circuit breakers для embedding/vector (см. [architecture.md](architecture.md#error_recoveryrs--circuit-breaker)). |
+| 001 `get_index_status` | ✅ | Completeness, sync age, embedder probe. |
+| 002 `validate_index` | ✅ | Integrity issues + recommendations. |
+| 003 `reindex` (ex `force_reindex`) | ✅ | `path` = one file; `force=true` = clear + full_sync + resolve. |
+| 004 `skeleton` | ✅ | AST-based signatures without bodies. |
+| 005 Lightweight checks (`symbol_exists`, …) | ❌ | Сняты с dispatch; host FS / symbol tools. |
+| 006 `search` + `include_scores` | ✅ | Hybrid vector+FTS; scores optional. |
+| 007 `suggest_commit` | ❌ | Снят; commit — host git. |
+| 008 Server-side cache | 🟡 | LRU `CacheManager` в `cache.rs`; MCP `get_cache_stats` снят. |
+| 009 `read_function_context` | 🟡 | Работает; `include_callees=true` — 1 уровень. |
+| 010 `read_types_only` | ✅ | Фильтрация по `kind`, docs. |
+| 011 `smart_file_selection` / `scoring_index` | ❌ | Сняты; используй `search`. |
+| 012 Incremental indexing | ✅ | `chunk_cache` + watcher. |
+| 013 `batch_operations` | ✅ | search / get_symbols / skeleton / get_references / read_function_context / read_types_only. |
+| 014 Query optimization | 🟡 | SQL-индексы `014_*.sql`; MCP `get_query_stats` снят. |
+| 015 Connection pooling | ✅ | `ResourceLimits` + semaphore. |
+| 016 Error recovery | ✅ | Circuit breakers embedding/vector. |
 
-**Phase 0 итого:** все 16 фич доступны; 2 с явными ограничениями (`has_documentation` заглушка, `read_function_context` без глубокого графа вызовов).
+**Актуальный MCP surface:** ~16 tools — search, symbols/refs/callers/impls, compact read, batch, index ops. Канон: [tools-reference.md](tools-reference.md).
 
 ## Phase 1: Runtime Context
 
@@ -48,9 +48,9 @@
 | `find_error_patterns` | 🔵 | В плане. Лог-анализ + panics из CI. |
 | `get_code_evolution` | 🔵 | В плане. Эвристика на основе git history. |
 | `find_hotspots` | 🔵 | В плане. Совмещение `code_churn` + сложности. |
-| `find_all_todos` | 🟡 | Эмулируется через `grep` с regex. Отдельного инструмента нет. |
+| `find_all_todos` | 🔵 | Host `rg` / agent; gofer grep tool снят. |
 | `get_code_churn` | 🔵 | В плане. |
-| `analyze_uncommitted_changes` | 🟡 | Эмулируется через `git_diff`. Самостоятельного анализа нет. |
+| `analyze_uncommitted_changes` | 🔵 | Host `git`; gofer `git_diff` снят. |
 | `suggest_tests_for_changes` | 🔵 | В плане. |
 | `check_breaking_changes` | 🔵 | В плане. Семантический diff API. |
 | `get_symbol_context` | 🟡 | Эмулируется через `read_function_context` + `get_callers/callees`. |
@@ -103,14 +103,14 @@
 
 | Фича | Статус | Комментарий |
 |---|---|---|
-| SQLite метаданные | ✅ | 16 активных миграций. |
+| SQLite метаданные | ✅ | Миграции в `migrations/`. |
 | LanceDB векторы | ✅ | С компакцией после pipeline. |
-| rkyv hot scoring index | ✅ | mmap, zero-copy. |
+| rkyv hot scoring index | ❌ | `scoring_index.rs` удалён; rkyv остаётся для embedding blobs + symbol cache. |
 | chunk_cache для skip-unchanged | ✅ | По `content_hash`. |
 | Watcher (notify + debounce) | ✅ | 500 мс окно. |
-| Reranker | 🔵 | Параметр `rerank=true` в API есть, но handler его игнорирует. Реализация — в планах. |
-| Domain detection (config-driven) | 🟡 | Хардкод-дефолты работают; `[domains]` в `config.toml` **не парсится**. См. [config-reference.md](config-reference.md#domains). |
-| Cross-stack links | 🟡 | Заполняется при индексации, на чтение через `get_api_routes` (handler есть, в dispatch не зарегистрирован). |
+| Reranker | 🔵 | В планах (не в текущем hybrid search). |
+| Domain detection (config-driven) | 🟡 | Эвристики path/content; см. `indexer/domains.rs` / config-reference. |
+| Cross-stack links | 🟡 | Таблицы миграций могут заполняться; отдельного MCP reader tool нет. |
 
 ## Дропнутые направления
 
@@ -127,7 +127,7 @@
 - `ROADMAP.md` — стратегические направления Phase 1+ (откуда взяты пункты выше).
 - `ROADMAP_EXTENSIONS.md`, `ROADMAP_INFRASTRUCTURE.md`, `ROADMAP_SANDBOXES.md` — детализация.
 - `OPTIMIZATION_OPPORTUNITIES.md` — список potential оптимизаций.
-- `SMART_COMMIT_DESIGN.md` — дизайн `suggest_commit` (реализован).
+- `SMART_COMMIT_DESIGN.md` — дизайн `suggest_commit` (**HISTORICAL**; tool снят).
 - `IMPLEMENTATION_PLAN.md` — общий план.
 
 Эти документы — **исторические**: код мог уйти вперёд или в сторону. Используй их как источник идей, не как спецификацию.

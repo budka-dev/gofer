@@ -1,10 +1,120 @@
-use super::common::{resolve_path, ToolContext};
+use super::common::{make_relative, resolve_path, ToolContext};
 use crate::error::GoferError;
 use crate::indexer::service::IndexerService;
 use anyhow::Result;
 use serde_json::{json, Value};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+/// Skip full content hash for files larger than this (bytes).
+const MAX_STALENESS_HASH_BYTES: u64 = 2 * 1024 * 1024;
+
+/// Result of comparing indexed file records against on-disk content.
+#[derive(Debug, Default)]
+struct DiskStaleness {
+    checked: usize,
+    skipped_large: usize,
+    /// Relative paths where disk content hash (or mtime fallback) differs from index.
+    stale: Vec<String>,
+    /// Relative paths present in the index but missing (or not a file) on disk.
+    missing_on_disk: Vec<String>,
+}
+
+/// Resolve an indexed path (absolute or relative) under the project root.
+fn abs_indexed_path(root: &Path, stored: &str) -> PathBuf {
+    let p = Path::new(stored);
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        root.join(p)
+    }
+}
+
+/// Sample indexed files and detect content/mtime divergence or missing paths on disk.
+///
+/// When `prefer_hash` is true (validate path), reads file content and compares blake3,
+/// matching the indexer (`blake3::hash(content.as_bytes()).to_hex()`). Files larger than
+/// 2MB are skipped for hashing and compared by mtime only. When `prefer_hash` is false
+/// (status path), uses mtime-only for speed.
+async fn check_disk_staleness(
+    ctx: &ToolContext,
+    limit: i64,
+    prefer_hash: bool,
+) -> Result<DiskStaleness> {
+    #[derive(sqlx::FromRow)]
+    struct FileRow {
+        path: String,
+        content_hash: String,
+        last_modified: i64,
+    }
+
+    let rows: Vec<FileRow> = sqlx::query_as(
+        r#"
+        SELECT path, content_hash, last_modified
+        FROM files
+        ORDER BY id
+        LIMIT ?
+        "#,
+    )
+    .bind(limit)
+    .fetch_all(ctx.sqlite.pool())
+    .await?;
+
+    let mut result = DiskStaleness::default();
+    let root = ctx.root_path.as_path();
+
+    for row in rows {
+        let abs = abs_indexed_path(root, &row.path);
+        let rel = make_relative(root, &row.path);
+
+        let meta = match tokio::fs::metadata(&abs).await {
+            Ok(m) if m.is_file() => m,
+            _ => {
+                result.missing_on_disk.push(rel);
+                result.checked += 1;
+                continue;
+            }
+        };
+
+        let disk_mtime = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        if prefer_hash {
+            if meta.len() > MAX_STALENESS_HASH_BYTES {
+                result.skipped_large += 1;
+                // Large files: mtime only; still count as checked.
+                if disk_mtime != row.last_modified {
+                    result.stale.push(rel);
+                }
+                result.checked += 1;
+                continue;
+            }
+
+            match tokio::fs::read_to_string(&abs).await {
+                Ok(content) => {
+                    let hash = blake3::hash(content.as_bytes()).to_hex().to_string();
+                    if hash != row.content_hash {
+                        result.stale.push(rel);
+                    }
+                }
+                Err(_) => {
+                    // Unreadable (permissions, encoding) — treat as missing for health.
+                    result.missing_on_disk.push(rel);
+                }
+            }
+        } else if disk_mtime != row.last_modified {
+            result.stale.push(rel);
+        }
+
+        result.checked += 1;
+    }
+
+    Ok(result)
+}
 
 pub async fn tool_get_index_status(ctx: &ToolContext) -> Result<Value> {
     use std::time::Instant;
@@ -245,6 +355,33 @@ pub async fn tool_get_index_status(ctx: &ToolContext) -> Result<Value> {
         }
     };
 
+    // Light disk staleness sample (mtime-only, up to 50 files) — keep status snappy.
+    let staleness = check_disk_staleness(ctx, 50, false)
+        .await
+        .unwrap_or_default();
+    let sample_stale: Vec<&str> = staleness.stale.iter().take(10).map(|s| s.as_str()).collect();
+    let stale_count = staleness.stale.len();
+    let missing_count = staleness.missing_on_disk.len();
+
+    if stale_count > 0 {
+        warnings.push(format!(
+            "[warning] {} of {} sampled files have disk mtime diverging from the index",
+            stale_count, staleness.checked
+        ));
+        recommendations.push(
+            "Call reindex path=<file> for stale paths, or reindex force=true to refresh".into(),
+        );
+    }
+    if missing_count > 0 {
+        warnings.push(format!(
+            "[warning] {} of {} sampled indexed files are missing on disk",
+            missing_count, staleness.checked
+        ));
+        recommendations.push(
+            "Run reindex force=true to drop deleted files and resync the index".into(),
+        );
+    }
+
     if warnings.is_empty() {
         recommendations.push("Index is healthy and up to date".to_string());
     }
@@ -288,6 +425,12 @@ pub async fn tool_get_index_status(ctx: &ToolContext) -> Result<Value> {
         "embeddings": {
             "total_chunks": chunk_count,
             "avg_chunks_per_file": format!("{:.2}", embedding_ratio)
+        },
+        "staleness": {
+            "checked": staleness.checked,
+            "stale": stale_count,
+            "missing_on_disk": missing_count,
+            "sample_stale": sample_stale,
         },
         "last_sync": last_sync_str,
         "age_minutes": age_minutes,
@@ -594,6 +737,89 @@ pub async fn tool_validate_index(ctx: &ToolContext) -> Result<Value> {
                 "action": "reindex_files",
                 "command": "reindex force=true",
                 "estimated_time_seconds": stale_files as u64 * 2
+            },
+            "auto_fixable": true
+        }));
+    }
+
+    // Validator 8: Disk content diverged from index (hash / missing files)
+    let disk = check_disk_staleness(ctx, 500, true).await?;
+    if !disk.stale.is_empty() {
+        let severity = if disk.stale.len() > 20 || disk.stale.len() * 5 > disk.checked.max(1) {
+            "high"
+        } else {
+            "medium"
+        };
+        let sample: Vec<&str> = disk.stale.iter().take(15).map(|s| s.as_str()).collect();
+        let paths_for_cmd: Vec<&str> = disk.stale.iter().take(5).map(|s| s.as_str()).collect();
+        let reindex_cmd = if disk.stale.len() > 10 {
+            "reindex force=true".to_string()
+        } else {
+            format!(
+                "reindex path={} (repeat per file)",
+                paths_for_cmd.join(" | reindex path=")
+            )
+        };
+
+        issues.push(json!({
+            "id": "content_stale_001",
+            "severity": severity,
+            "category": "outdated_data",
+            "message": format!(
+                "{} of {} checked files have content that no longer matches the index",
+                disk.stale.len(),
+                disk.checked
+            ),
+            "details": {
+                "description": "Disk blake3 content hash differs from files.content_hash (or mtime for files >2MB)",
+                "impact": "Search and symbols may reflect outdated source",
+                "root_cause": "File changed on disk without reindex (watcher gap, external edit, or partial sync)",
+                "checked": disk.checked,
+                "stale": disk.stale.len(),
+                "skipped_large": disk.skipped_large,
+                "examples": sample
+            },
+            "affected_items": disk.stale.iter().take(50).map(|p| format!("file: {}", p)).collect::<Vec<_>>(),
+            "recommendation": {
+                "action": "reindex_files",
+                "paths": disk.stale.iter().take(50).cloned().collect::<Vec<_>>(),
+                "command": reindex_cmd,
+                "estimated_time_seconds": (disk.stale.len() as u64).saturating_mul(2).max(1)
+            },
+            "auto_fixable": true
+        }));
+    }
+
+    if !disk.missing_on_disk.is_empty() {
+        let sample: Vec<&str> = disk
+            .missing_on_disk
+            .iter()
+            .take(15)
+            .map(|s| s.as_str())
+            .collect();
+        issues.push(json!({
+            "id": "missing_on_disk_001",
+            "severity": "high",
+            "category": "orphaned_data",
+            "message": format!(
+                "{} of {} checked indexed files are missing on disk",
+                disk.missing_on_disk.len(),
+                disk.checked
+            ),
+            "details": {
+                "description": "Index still has file rows for paths that no longer exist under the project root",
+                "impact": "Orphan symbols/chunks; path-based tools may fail",
+                "root_cause": "Files deleted without delete_file / full_sync cleanup",
+                "checked": disk.checked,
+                "missing_on_disk": disk.missing_on_disk.len(),
+                "examples": sample
+            },
+            "affected_items": disk.missing_on_disk.iter().take(50).map(|p| format!("file: {}", p)).collect::<Vec<_>>(),
+            "recommendation": {
+                "action": "reindex_files",
+                "paths": disk.missing_on_disk.iter().take(50).cloned().collect::<Vec<_>>(),
+                "command": "reindex force=true",
+                "estimated_time_seconds": 60
             },
             "auto_fixable": true
         }));
