@@ -332,6 +332,22 @@ impl LanceStorage {
         Ok(())
     }
 
+    /// Drop the entire code_chunks table and recreate an empty one.
+    /// Used by force reindex so orphan embeddings cannot survive a rebuild.
+    pub async fn clear_all(&self) -> Result<()> {
+        {
+            let mut table_guard = self.table.write().await;
+            *table_guard = None;
+        }
+        let names = self.db.table_names().execute().await?;
+        if names.iter().any(|n| n == TABLE_NAME) {
+            self.db.drop_table(TABLE_NAME, &[]).await?;
+            tracing::info!("LanceDB: dropped table '{}'", TABLE_NAME);
+        }
+        self.ensure_table().await?;
+        Ok(())
+    }
+
     /// Create an IVF-PQ vector index for faster ANN search.
     /// Uses incremental logic: only rebuilds if row count grew >= 20% since last build.
     pub async fn create_vector_index_incremental(

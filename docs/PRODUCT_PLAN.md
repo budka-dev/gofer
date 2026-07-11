@@ -1,6 +1,6 @@
 # gofer product plan — index search MCP only
 
-**Status:** quality pass — full reindex, embedder/ref health, compact-read structure, search/path boosts, resolve prefers pub.
+**Status:** quality++ — Lance wipe on force reindex, typed ref edges (inherit/type_usage), noise filter, live bench script.
 
 **Principle:** index + search + compact read. Host agent owns FS, grep, git, edits, answers.  
 **Anti-goal:** replace host-agent tools.

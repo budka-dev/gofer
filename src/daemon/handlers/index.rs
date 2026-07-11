@@ -657,6 +657,12 @@ pub async fn tool_reindex(args: Value, ctx: &ToolContext) -> Result<Value> {
         sqlx::query("DELETE FROM files").execute(pool).await?;
         let _ = sqlx::query("DELETE FROM dependency_usage").execute(pool).await;
 
+        // Wipe vector store so orphan embeddings cannot survive the rebuild.
+        ctx.lance
+            .clear_all()
+            .await
+            .map_err(|e| GoferError::ToolError(format!("lance clear failed: {}", e)))?;
+
         // Full disk → index rebuild (parse + embed + write).
         indexer
             .full_sync(
@@ -680,13 +686,15 @@ pub async fn tool_reindex(args: Value, ctx: &ToolContext) -> Result<Value> {
         ctx.cache.invalidate_all_searches().await;
 
         let file_count = ctx.sqlite.get_file_count().await.unwrap_or(0);
+        let chunks = ctx.lance.count().await.unwrap_or(0);
         return Ok(json!({
             "ok": true,
             "mode": "force_full",
             "files_indexed": file_count,
+            "chunks": chunks,
             "refs_resolved": resolved,
             "duration_ms": start.elapsed().as_millis(),
-            "message": "Cleared symbol tables, ran full pipeline sync, resolved references.",
+            "message": "Cleared SQLite + Lance, full_sync, resolved references.",
         }));
     }
 

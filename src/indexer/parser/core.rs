@@ -353,6 +353,28 @@ impl CodeParser {
         Ok(chunks)
     }
 
+    /// Built-in / noise type names that should not create type_usage edges.
+    fn is_noise_type_name(name: &str) -> bool {
+        matches!(
+            name,
+            // Shared / Rust / Go / Python / TS primitives (unique arms only)
+            "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
+                | "u8" | "u16" | "u32" | "u64" | "u128" | "usize"
+                | "f32" | "f64" | "float32" | "float64"
+                | "int" | "int8" | "int16" | "int32" | "int64"
+                | "uint" | "uint8" | "uint16" | "uint32" | "uint64"
+                | "bool" | "boolean" | "char" | "byte" | "rune" | "str" | "string" | "String"
+                | "Self" | "self" | "number" | "bigint" | "symbol"
+                | "any" | "Any" | "unknown" | "void" | "never" | "undefined" | "null" | "None"
+                | "object" | "error" | "bytes" | "list" | "dict" | "tuple"
+                | "Vec" | "Option" | "Result" | "Box" | "Arc" | "Rc"
+                | "Mutex" | "RwLock" | "HashMap" | "HashSet" | "BTreeMap" | "BTreeSet"
+                | "Path" | "PathBuf" | "OsStr" | "OsString" | "CString" | "CStr"
+                | "Promise" | "Array" | "Map" | "Set" | "Record" | "Partial" | "Required"
+                | "Readonly" | "Optional" | "List" | "Dict" | "Tuple"
+        )
+    }
+
     pub fn parse_references(
         &mut self,
         content: &str,
@@ -404,18 +426,38 @@ impl CodeParser {
             for capture in match_.captures {
                 let name = capture_names[capture.index as usize];
                 let node = capture.node;
-                let text = &content[node.byte_range()];
-
-                if name == "call" || name == "type_usage" {
-                    refs.push(SymbolReference {
-                        id: 0,
-                        source_symbol_id: 0,
-                        target_name: text.to_string(),
-                        target_symbol_id: None,
-                        kind: "call".to_string(),
-                        line: node.start_position().row as i32,
-                    });
+                let text = content[node.byte_range()].trim();
+                if text.is_empty() || text.len() > 200 {
+                    continue;
                 }
+
+                // Map tree-sitter capture → graph edge kind.
+                // Prefer real kinds so get_callers can filter call/usage only
+                // while get_references still surfaces type_usage / inherit / import.
+                let kind = match name {
+                    "call" => "call",
+                    "usage" => "usage",
+                    "type_usage" => "type_usage",
+                    "import" => "import",
+                    "inherit" | "implements" | "extends" => "inherit",
+                    // legacy captures treated as calls
+                    "method" | "function" => "call",
+                    _ => continue,
+                };
+
+                // Drop primitive / noise type usages that explode the graph.
+                if kind == "type_usage" && Self::is_noise_type_name(text) {
+                    continue;
+                }
+
+                refs.push(SymbolReference {
+                    id: 0,
+                    source_symbol_id: 0,
+                    target_name: text.to_string(),
+                    target_symbol_id: None,
+                    kind: kind.to_string(),
+                    line: node.start_position().row as i32,
+                });
             }
         }
 

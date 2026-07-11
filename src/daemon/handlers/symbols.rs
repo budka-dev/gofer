@@ -509,6 +509,7 @@ pub async fn tool_find_implementations(args: Value, ctx: &ToolContext) -> Result
         .map_err(|e| GoferError::ToolError(format!("query failed: {}", e)))?;
 
     let mut impls = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for row in &rows {
         let sig: String = row.try_get("signature").unwrap_or_default();
         let kind: String = row.try_get("kind").unwrap_or_default();
@@ -519,6 +520,11 @@ pub async fn tool_find_implementations(args: Value, ctx: &ToolContext) -> Result
         let relation = classify_implementation(&sig, name);
         let Some(relation) = relation else { continue };
 
+        let key = format!("{}:{}:{}", file_path, line, sym_name);
+        if !seen.insert(key) {
+            continue;
+        }
+
         impls.push(json!({
             "type": sym_name,
             "kind": kind,
@@ -526,9 +532,39 @@ pub async fn tool_find_implementations(args: Value, ctx: &ToolContext) -> Result
             "file": make_relative(&ctx.root_path, &file_path),
             "line": line,
             "signature": sig,
+            "source": "signature",
         }));
         if impls.len() as i64 >= limit {
             break;
+        }
+    }
+
+    // Also pull inherit edges from the reference graph (fresh index with @inherit captures).
+    if (impls.len() as i64) < limit {
+        let inherit_refs = ctx
+            .sqlite
+            .get_references_for_symbol(name, None, true)
+            .await
+            .unwrap_or_default();
+        for r in inherit_refs {
+            if r.ref_kind != "inherit" {
+                continue;
+            }
+            let key = format!("{}:{}:inherit", r.file_path, r.line);
+            if !seen.insert(key) {
+                continue;
+            }
+            impls.push(json!({
+                "type": null,
+                "kind": "inherit_edge",
+                "relation": "implements_trait",
+                "file": make_relative(&ctx.root_path, &r.file_path),
+                "line": r.line,
+                "source": "graph",
+            }));
+            if impls.len() as i64 >= limit {
+                break;
+            }
         }
     }
 
@@ -537,7 +573,7 @@ pub async fn tool_find_implementations(args: Value, ctx: &ToolContext) -> Result
         "count": impls.len(),
         "truncated": impls.len() as i64 >= limit,
         "implementations": impls,
-        "note": "Go interface satisfaction is structural and not detected here.",
+        "note": "Go interface satisfaction is structural and not detected. Graph inherit edges need reindex after query pack update.",
     }))
 }
 

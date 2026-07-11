@@ -100,6 +100,18 @@ gofer does **not** embed locally. It POSTs batches to an HTTP embed endpoint (de
 |---|---|
 | Embedder up | Full hybrid `search` (vector + FTS) |
 | Embedder down | `search` degrades to keyword/FTS where possible and may set `degraded`/warnings; symbol tools and compact read keep working |
-| No index / empty project | Run `gofer init` + `gofer start`, or MCP `reindex` + project activate |
+| No index / empty project | MCP `reindex force=true` (full SQLite+Lance rebuild) or `gofer start` |
 
-Config: project `.gofer` / embed URL in project settings (see [config-reference.md](config-reference.md) if present).
+## Force reindex
+
+`reindex force=true` clears **SQLite** symbol tables **and** the **Lance** `code_chunks` table, then runs full_sync + resolve_references. Orphan embeddings cannot survive.
+
+After updating tree-sitter query packs under `~/.gofer/langs/*/queries/`, run force reindex so new `@inherit` / `@type_usage` edges are captured.
+
+## Live micro-bench
+
+```bash
+./scripts/bench_live.sh dispatch
+```
+
+Config: project `.gofer` / embed URL (see [config-reference.md](config-reference.md) if present).
